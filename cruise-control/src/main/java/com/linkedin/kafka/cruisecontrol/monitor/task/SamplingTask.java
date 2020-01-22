@@ -1,5 +1,5 @@
 /*
- * Copyright 2017 LinkedIn Corp. Licensed under the BSD 2-Clause License (the "License").  See License in the project root for license information.
+ * Copyright 2017 LinkedIn Corp. Licensed under the BSD 2-Clause License (the "License"). See License in the project root for license information.
  */
 
 package com.linkedin.kafka.cruisecontrol.monitor.task;
@@ -43,7 +43,7 @@ class SamplingTask implements Runnable {
 
   public void run() {
     long now = _time.milliseconds();
-    if (_loadMonitorTaskRunner.compareAndSetState(LoadMonitorTaskRunner.LoadMonitorTaskRunnerState.RUNNING,
+    if (!_loadMonitorTaskRunner.awaitingPauseSampling() && _loadMonitorTaskRunner.compareAndSetState(LoadMonitorTaskRunner.LoadMonitorTaskRunnerState.RUNNING,
                                                   LoadMonitorTaskRunner.LoadMonitorTaskRunnerState.SAMPLING)) {
       long samplingPeriodEndMs = now;
       try {
@@ -78,7 +78,9 @@ class SamplingTask implements Runnable {
                                                   LoadMonitorTaskRunner.LoadMonitorTaskRunnerState.RUNNING);
       }
     } else {
-      LOG.info("Skip sampling because the load monitor is in {} state.", _loadMonitorTaskRunner.state());
+      String reason = _loadMonitorTaskRunner.reasonOfLatestPauseOrResume();
+      LOG.info("Skip sampling because the load monitor is in {} state{}.", _loadMonitorTaskRunner.state(),
+               String.format(reason == null ? "" : " due to %s.", reason));
       // Something else is in progress, we advance the end time to avoid a big metric fetch after bootstrap finishes.
       // Otherwise we may see some memory issue.
       _lastSamplingPeriodEndTimeMs = now - _samplingIntervalMs;

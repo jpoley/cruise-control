@@ -1,5 +1,5 @@
 /*
- * Copyright 2017 LinkedIn Corp. Licensed under the BSD 2-Clause License (the "License").  See License in the project root for license information.
+ * Copyright 2017 LinkedIn Corp. Licensed under the BSD 2-Clause License (the "License"). See License in the project root for license information.
  */
 
 package com.linkedin.kafka.cruisecontrol.monitor;
@@ -7,63 +7,93 @@ package com.linkedin.kafka.cruisecontrol.monitor;
 import com.codahale.metrics.Gauge;
 import com.codahale.metrics.MetricRegistry;
 import com.codahale.metrics.Timer;
+import com.linkedin.cruisecontrol.exception.NotEnoughValidWindowsException;
+import com.linkedin.cruisecontrol.metricdef.MetricDef;
+import com.linkedin.cruisecontrol.monitor.sampling.aggregator.AggregatedMetricValues;
+import com.linkedin.cruisecontrol.monitor.sampling.aggregator.MetricSampleCompleteness;
+import com.linkedin.cruisecontrol.monitor.sampling.aggregator.ValuesAndExtrapolations;
+import com.linkedin.kafka.cruisecontrol.KafkaCruiseControlUtils;
 import com.linkedin.kafka.cruisecontrol.analyzer.AnalyzerUtils;
 import com.linkedin.kafka.cruisecontrol.common.KafkaCruiseControlThreadFactory;
 import com.linkedin.kafka.cruisecontrol.common.MetadataClient;
 import com.linkedin.kafka.cruisecontrol.common.Resource;
 import com.linkedin.kafka.cruisecontrol.config.BrokerCapacityConfigResolver;
+import com.linkedin.kafka.cruisecontrol.config.BrokerCapacityInfo;
 import com.linkedin.kafka.cruisecontrol.config.KafkaCruiseControlConfig;
-import com.linkedin.kafka.cruisecontrol.exception.ModelInputException;
-import com.linkedin.kafka.cruisecontrol.exception.NotEnoughValidSnapshotsException;
-import com.linkedin.kafka.cruisecontrol.exception.NotEnoughSnapshotsException;
-import com.linkedin.kafka.cruisecontrol.model.Broker;
+import com.linkedin.kafka.cruisecontrol.async.progress.GeneratingClusterModel;
+import com.linkedin.kafka.cruisecontrol.async.progress.OperationProgress;
+import com.linkedin.kafka.cruisecontrol.async.progress.WaitingForClusterModel;
+import com.linkedin.kafka.cruisecontrol.config.TopicConfigProvider;
+import com.linkedin.kafka.cruisecontrol.config.constants.AnalyzerConfig;
+import com.linkedin.kafka.cruisecontrol.config.constants.MonitorConfig;
+import com.linkedin.kafka.cruisecontrol.executor.Executor;
 import com.linkedin.kafka.cruisecontrol.model.ClusterModel;
-import com.linkedin.kafka.cruisecontrol.monitor.sampling.aggregator.MetricCompletenessChecker;
-import com.linkedin.kafka.cruisecontrol.monitor.sampling.aggregator.MetricSampleAggregationResult;
-import com.linkedin.kafka.cruisecontrol.monitor.sampling.aggregator.MetricSampleAggregator;
-import com.linkedin.kafka.cruisecontrol.monitor.sampling.PartitionMetricSample;
-import com.linkedin.kafka.cruisecontrol.monitor.sampling.Snapshot;
+import com.linkedin.kafka.cruisecontrol.monitor.sampling.holder.BrokerEntity;
+import com.linkedin.kafka.cruisecontrol.monitor.sampling.holder.PartitionEntity;
+import com.linkedin.kafka.cruisecontrol.monitor.sampling.aggregator.KafkaBrokerMetricSampleAggregator;
+import com.linkedin.kafka.cruisecontrol.monitor.sampling.aggregator.KafkaPartitionMetricSampleAggregator;
+import com.linkedin.cruisecontrol.monitor.sampling.aggregator.MetricSampleAggregationResult;
+import com.linkedin.kafka.cruisecontrol.monitor.sampling.holder.PartitionMetricSample;
+import com.linkedin.kafka.cruisecontrol.monitor.sampling.aggregator.SampleExtrapolation;
 import com.linkedin.kafka.cruisecontrol.monitor.task.LoadMonitorTaskRunner;
+import com.linkedin.kafka.cruisecontrol.servlet.response.stats.BrokerStats;
+import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.SortedMap;
-import java.util.TreeMap;
+import java.util.SortedSet;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.Semaphore;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
 import org.apache.kafka.clients.Metadata;
+import org.apache.kafka.clients.admin.AdminClient;
 import org.apache.kafka.common.Cluster;
 import org.apache.kafka.common.Node;
-import org.apache.kafka.common.PartitionInfo;
 import org.apache.kafka.common.TopicPartition;
+import org.apache.kafka.common.internals.ClusterResourceListeners;
+import org.apache.kafka.common.utils.LogContext;
 import org.apache.kafka.common.utils.Time;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import static com.linkedin.kafka.cruisecontrol.config.constants.MonitorConfig.SKIP_LOADING_SAMPLES_CONFIG;
+import static com.linkedin.kafka.cruisecontrol.monitor.MonitorUtils.getRackHandleNull;
+import static com.linkedin.kafka.cruisecontrol.monitor.MonitorUtils.getReplicaPlacementInfo;
+import static com.linkedin.kafka.cruisecontrol.monitor.MonitorUtils.partitionSampleExtrapolations;
+import static com.linkedin.kafka.cruisecontrol.monitor.MonitorUtils.populatePartitionLoad;
+import static com.linkedin.kafka.cruisecontrol.monitor.MonitorUtils.setBadBrokerState;
+import static com.linkedin.kafka.cruisecontrol.servlet.parameters.ParameterUtils.DEFAULT_START_TIME_FOR_CLUSTER_MODEL;
+
 /**
- * The LoadMonitor monitors the workload of a kafka cluster. It periodically triggers the metric sampling and
+ * The LoadMonitor monitors the workload of a Kafka cluster. It periodically triggers the metric sampling and
  * maintains the collected {@link PartitionMetricSample}. It is also responsible for aggregate the metrics samples into
- * {@link Snapshot} for the analyzer to generate the balancing proposals.
+ * {@link AggregatedMetricValues} for the analyzer to generate the balancing proposals.
  */
 public class LoadMonitor {
 
   // Kafka Load Monitor server log.
   private static final Logger LOG = LoggerFactory.getLogger(LoadMonitor.class);
-  private static final long METADATA_TTL = 5000L;
-  private final int _numSnapshots;
+  // Metadata TTL is set based on experience -- i.e. a short TTL with large metadata may cause excessive load on brokers.
+  private static final long METADATA_TTL = 10000L;
+  private static final long METADATA_REFRESH_BACKOFF = 5000L;
+  private final int _numPartitionMetricSampleWindows;
   private final LoadMonitorTaskRunner _loadMonitorTaskRunner;
-  private final MetricSampleAggregator _metricSampleAggregator;
+  private final KafkaPartitionMetricSampleAggregator _partitionMetricSampleAggregator;
+  private final KafkaBrokerMetricSampleAggregator _brokerMetricSampleAggregator;
   // A semaphore to help throttle the simultaneous cluster model creation
   private final Semaphore _clusterModelSemaphore;
+  private final KafkaCruiseControlConfig _config;
   private final MetadataClient _metadataClient;
+  private final AdminClient _adminClient;
   private final BrokerCapacityConfigResolver _brokerCapacityConfigResolver;
-  private final ScheduledExecutorService _sensorUpdaterExecutor;
-  private final MetricCompletenessChecker _metricCompletenessChecker;
-  private final MetricRegistry _dropwizardMetricRegistry;
+  private final TopicConfigProvider _topicConfigProvider;
+  private final ScheduledExecutorService _loadMonitorExecutor;
   private final Timer _clusterModelCreationTimer;
   private final ThreadLocal<Boolean> _acquiredClusterModelSemaphore;
   private final ModelCompletenessRequirements _defaultModelCompletenessRequirements;
@@ -72,65 +102,103 @@ public class LoadMonitor {
   private volatile int _numValidSnapshotWindows;
   private volatile double _monitoredPartitionsPercentage;
   private volatile int _totalMonitoredSnapshotWindows;
-  private volatile int _numPartitionsWithFlaw;
+  private volatile int _numPartitionsWithExtrapolations;
   private volatile long _lastUpdate;
 
   private volatile ModelGeneration _cachedBrokerLoadGeneration;
-  private volatile ClusterModel.BrokerStats _cachedBrokerLoadStats;
+  private volatile BrokerStats _cachedBrokerLoadStats;
 
   /**
    * Construct a load monitor.
    *
    * @param config The load monitor configuration.
    * @param time   The time object.
+   * @param executor The proposal executor.
+   * @param dropwizardMetricRegistry The sensor registry for cruise control
+   * @param metricDef The metric definitions.
    */
   public LoadMonitor(KafkaCruiseControlConfig config,
                      Time time,
-                     MetricRegistry dropwizardMetricRegistry) {
-    Metadata metadata = new Metadata(5000L, config.getLong(KafkaCruiseControlConfig.METADATA_MAX_AGE_CONFIG));
-    _metadataClient = new MetadataClient(config, metadata, METADATA_TTL, time);
+                     Executor executor,
+                     MetricRegistry dropwizardMetricRegistry,
+                     MetricDef metricDef) {
+    this(config,
+         new MetadataClient(config,
+                            new Metadata(METADATA_REFRESH_BACKOFF,
+                                         config.getLong(MonitorConfig.METADATA_MAX_AGE_CONFIG),
+                                         new LogContext(),
+                                         new ClusterResourceListeners()),
+                            METADATA_TTL,
+                            time),
+         KafkaCruiseControlUtils.createAdminClient(KafkaCruiseControlUtils.parseAdminClientConfigs(config)),
+         time,
+         executor,
+         dropwizardMetricRegistry,
+         metricDef);
+  }
 
-    _brokerCapacityConfigResolver = config.getConfiguredInstance(KafkaCruiseControlConfig.BROKER_CAPACITY_CONFIG_RESOLVER_CLASS_CONFIG,
+  /**
+   * Package private constructor for unit tests.
+   */
+  LoadMonitor(KafkaCruiseControlConfig config,
+              MetadataClient metadataClient,
+              AdminClient adminClient,
+              Time time,
+              Executor executor,
+              MetricRegistry dropwizardMetricRegistry,
+              MetricDef metricDef) {
+    _config = config;
+
+    _metadataClient = metadataClient;
+
+    _adminClient = adminClient;
+
+    _brokerCapacityConfigResolver = config.getConfiguredInstance(MonitorConfig.BROKER_CAPACITY_CONFIG_RESOLVER_CLASS_CONFIG,
                                                                  BrokerCapacityConfigResolver.class);
-    _numSnapshots = config.getInt(KafkaCruiseControlConfig.NUM_LOAD_SNAPSHOTS_CONFIG);
+    _topicConfigProvider = config.getConfiguredInstance(MonitorConfig.TOPIC_CONFIG_PROVIDER_CLASS_CONFIG,
+                                                                 TopicConfigProvider.class);
+    _numPartitionMetricSampleWindows = config.getInt(MonitorConfig.NUM_PARTITION_METRICS_WINDOWS_CONFIG);
 
-    _metricCompletenessChecker = new MetricCompletenessChecker(_numSnapshots);
+    _partitionMetricSampleAggregator = new KafkaPartitionMetricSampleAggregator(config, metadataClient.metadata());
 
-    _metricSampleAggregator = new MetricSampleAggregator(config, metadata, _metricCompletenessChecker);
+    _brokerMetricSampleAggregator = new KafkaBrokerMetricSampleAggregator(config);
 
     _acquiredClusterModelSemaphore = ThreadLocal.withInitial(() -> false);
 
     // We use the number of proposal precomputing threads config to ensure there is enough concurrency if users
     // wants that.
-    int numPrecomputingThread = config.getInt(KafkaCruiseControlConfig.NUM_PROPOSAL_PRECOMPUTE_THREADS_CONFIG);
+    int numPrecomputingThread = config.getInt(AnalyzerConfig.NUM_PROPOSAL_PRECOMPUTE_THREADS_CONFIG);
     _clusterModelSemaphore = new Semaphore(Math.max(1, numPrecomputingThread), true);
 
     _defaultModelCompletenessRequirements =
-        MonitorUtils.combineLoadRequirementOptions(AnalyzerUtils.getGoalMapByPriority(config).values());
+        MonitorUtils.combineLoadRequirementOptions(AnalyzerUtils.getGoalsByPriority(config));
 
-    _dropwizardMetricRegistry = dropwizardMetricRegistry;
-    _loadMonitorTaskRunner = new LoadMonitorTaskRunner(config, _metricSampleAggregator, _metadataClient, time,
-                                                       dropwizardMetricRegistry);
-    _clusterModelCreationTimer = _dropwizardMetricRegistry.timer(MetricRegistry.name("LoadMonitor",
-                                                                                     "cluster-model-creation-timer"));
-    SensorUpdater sensorUpdater = new SensorUpdater();
-    _sensorUpdaterExecutor = Executors.newSingleThreadScheduledExecutor(new KafkaCruiseControlThreadFactory("LoadMonitorSensorUpdater", true, LOG));
-    _sensorUpdaterExecutor.scheduleAtFixedRate(sensorUpdater, 0, SensorUpdater.UPDATE_INTERVAL_MS, TimeUnit.MILLISECONDS);
-    _dropwizardMetricRegistry.register(MetricRegistry.name("LoadMonitor", "valid-snapshot-windows"),
-                                       (Gauge<Integer>) this::numValidSnapshotWindows);
-    _dropwizardMetricRegistry.register(MetricRegistry.name("LoadMonitor", "monitored-partitions-percentage"),
-                                       (Gauge<Double>) this::monitoredPartitionsPercentage);
-    _dropwizardMetricRegistry.register(MetricRegistry.name("LoadMonitor", "total-monitored-snapshot-windows"),
-                                       (Gauge<Integer>) this::totalMonitoredSnapshotWindows);
-    _dropwizardMetricRegistry.register(MetricRegistry.name("LoadMonitor", "num-partitions-with-flaw"),
-                                       (Gauge<Integer>) this::numPartitionsWithFlaw);
+    _loadMonitorTaskRunner =
+        new LoadMonitorTaskRunner(config, _partitionMetricSampleAggregator, _brokerMetricSampleAggregator, _metadataClient,
+                                  metricDef, time, dropwizardMetricRegistry, _brokerCapacityConfigResolver, executor);
+    _clusterModelCreationTimer = dropwizardMetricRegistry.timer(MetricRegistry.name("LoadMonitor",
+                                                                                    "cluster-model-creation-timer"));
+    _loadMonitorExecutor = Executors.newScheduledThreadPool(2,
+                                                            new KafkaCruiseControlThreadFactory("LoadMonitorExecutor", true, LOG));
+    _loadMonitorExecutor.scheduleAtFixedRate(new SensorUpdater(), 0, SensorUpdater.UPDATE_INTERVAL_MS, TimeUnit.MILLISECONDS);
+    _loadMonitorExecutor.scheduleAtFixedRate(new PartitionMetricSampleAggregatorCleaner(), 0,
+                                             PartitionMetricSampleAggregatorCleaner.CHECK_INTERVAL_MS, TimeUnit.MILLISECONDS);
+    dropwizardMetricRegistry.register(MetricRegistry.name("LoadMonitor", "valid-windows"),
+                                      (Gauge<Integer>) this::numValidSnapshotWindows);
+    dropwizardMetricRegistry.register(MetricRegistry.name("LoadMonitor", "monitored-partitions-percentage"),
+                                      (Gauge<Double>) this::monitoredPartitionsPercentage);
+    dropwizardMetricRegistry.register(MetricRegistry.name("LoadMonitor", "total-monitored-windows"),
+                                      (Gauge<Integer>) this::totalMonitoredSnapshotWindows);
+    dropwizardMetricRegistry.register(MetricRegistry.name("LoadMonitor", "num-partitions-with-extrapolations"),
+                                      (Gauge<Integer>) this::numPartitionsWithExtrapolations);
   }
+
 
   /**
    * Start the load monitor.
    */
   public void startUp() {
-    _loadMonitorTaskRunner.start();
+    _loadMonitorTaskRunner.start(_config.getBoolean(SKIP_LOADING_SAMPLES_CONFIG));
   }
 
   /**
@@ -140,51 +208,43 @@ public class LoadMonitor {
     LOG.info("Shutting down load monitor.");
     try {
       _brokerCapacityConfigResolver.close();
-      _sensorUpdaterExecutor.shutdown();
+      _topicConfigProvider.close();
+      _loadMonitorExecutor.shutdown();
     } catch (Exception e) {
       LOG.warn("Received exception when closing broker capacity resolver.", e);
     }
     _loadMonitorTaskRunner.shutdown();
+    _metadataClient.close();
+    KafkaCruiseControlUtils.closeAdminClientWithTimeout(_adminClient);
     LOG.info("Load Monitor shutdown completed.");
   }
 
   /**
-   * Get the state of the load monitor.
+   * @return The state of the load monitor.
    */
-  public LoadMonitorState state() {
+  public LoadMonitorState state(OperationProgress operationProgress, Cluster kafkaCluster) {
     LoadMonitorTaskRunner.LoadMonitorTaskRunnerState state = _loadMonitorTaskRunner.state();
-    MetadataClient.ClusterAndGeneration clusterAndGeneration = _metadataClient.clusterAndGeneration();
-    Cluster kafkaCluster = clusterAndGeneration.cluster();
     int totalNumPartitions = MonitorUtils.totalNumPartitions(kafkaCluster);
     double minMonitoredPartitionsPercentage = _defaultModelCompletenessRequirements.minMonitoredPartitionsPercentage();
 
     // Get the window to monitored partitions percentage mapping.
-    Map<Long, Double> windowToMonitoredPercentage =
-        _metricCompletenessChecker.monitoredPercentages(clusterModelGeneration(),
-                                                        clusterAndGeneration.cluster(),
-                                                        totalNumPartitions);
+    SortedMap<Long, Float> validPartitionRatio = _partitionMetricSampleAggregator.validPartitionRatioByWindows(kafkaCluster);
 
     // Get valid snapshot window number and populate the monitored partition map.
-    // We do this primarily because the checker and aggregator are not always synchronized.
-    int numValidSnapshotWindows = 0;
-    SortedMap<Long, Double> loadSnapshotsWindows = new TreeMap<>();
-    for (long window : _metricSampleAggregator.snapshotWindows()) {
-      double monitoredPartitionsPercentage = windowToMonitoredPercentage.getOrDefault(window, 0.0);
-      numValidSnapshotWindows =
-          monitoredPartitionsPercentage < minMonitoredPartitionsPercentage ? 0 : numValidSnapshotWindows + 1;
-      loadSnapshotsWindows.put(window, monitoredPartitionsPercentage);
-    }
+    SortedSet<Long> validWindows = _partitionMetricSampleAggregator.validWindows(kafkaCluster,
+                                                                                 minMonitoredPartitionsPercentage);
+    int numValidSnapshotWindows = validWindows.size();
 
-    // Get the number of valid partitions and sample flaws.
+    // Get the number of valid partitions and sample extrapolations.
     int numValidPartitions = 0;
-    Map<TopicPartition, List<MetricSampleAggregationResult.SampleFlaw>> sampleFlaws = Collections.emptyMap();
-    if (_metricSampleAggregator.numSnapshotWindows() > _numSnapshots) {
+    Map<TopicPartition, List<SampleExtrapolation>> extrapolations = Collections.emptyMap();
+    if (_partitionMetricSampleAggregator.numAvailableWindows() >= _numPartitionMetricSampleWindows) {
       try {
-        MetricSampleAggregationResult metricSampleAggregationResult =
-            _metricSampleAggregator.recentSnapshots(kafkaCluster, Long.MAX_VALUE);
-        Map<TopicPartition, Snapshot[]> loadSnapshots = metricSampleAggregationResult.snapshots();
-        sampleFlaws = metricSampleAggregationResult.sampleFlaws();
-        numValidPartitions = loadSnapshots.size();
+        MetricSampleAggregationResult<String, PartitionEntity> metricSampleAggregationResult =
+            _partitionMetricSampleAggregator.aggregate(kafkaCluster, Long.MAX_VALUE, operationProgress);
+        Map<PartitionEntity, ValuesAndExtrapolations> loads = metricSampleAggregationResult.valuesAndExtrapolations();
+        extrapolations = partitionSampleExtrapolations(metricSampleAggregationResult.valuesAndExtrapolations());
+        numValidPartitions = loads.size();
       } catch (Exception e) {
         LOG.warn("Received exception when trying to get the load monitor state", e);
       }
@@ -195,40 +255,42 @@ public class LoadMonitor {
         return LoadMonitorState.notStarted();
       case RUNNING:
         return LoadMonitorState.running(numValidSnapshotWindows,
-                                        loadSnapshotsWindows,
+                                        validPartitionRatio,
                                         numValidPartitions,
                                         totalNumPartitions,
-                                        sampleFlaws);
+                                        extrapolations,
+                                        _loadMonitorTaskRunner.reasonOfLatestPauseOrResume());
       case SAMPLING:
         return LoadMonitorState.sampling(numValidSnapshotWindows,
-                                         loadSnapshotsWindows,
+                                         validPartitionRatio,
                                          numValidPartitions,
                                          totalNumPartitions,
-                                         sampleFlaws);
+                                         extrapolations);
       case PAUSED:
         return LoadMonitorState.paused(numValidSnapshotWindows,
-                                       loadSnapshotsWindows,
+                                       validPartitionRatio,
                                        numValidPartitions,
                                        totalNumPartitions,
-                                       sampleFlaws);
+                                       extrapolations,
+                                       _loadMonitorTaskRunner.reasonOfLatestPauseOrResume());
       case BOOTSTRAPPING:
         double bootstrapProgress = _loadMonitorTaskRunner.bootStrapProgress();
         // Handle the race between querying the state and getting the progress.
         return LoadMonitorState.bootstrapping(numValidSnapshotWindows,
-                                              loadSnapshotsWindows,
+                                              validPartitionRatio,
                                               numValidPartitions,
                                               totalNumPartitions,
                                               bootstrapProgress >= 0 ? bootstrapProgress : 1.0,
-                                              sampleFlaws);
+                                              extrapolations);
       case TRAINING:
         return LoadMonitorState.training(numValidSnapshotWindows,
-                                         loadSnapshotsWindows,
+                                         validPartitionRatio,
                                          numValidPartitions,
                                          totalNumPartitions,
-                                         sampleFlaws);
+                                         extrapolations);
       case LOADING:
         return LoadMonitorState.loading(numValidSnapshotWindows,
-                                        loadSnapshotsWindows,
+                                        validPartitionRatio,
                                         numValidPartitions,
                                         totalNumPartitions,
                                         _loadMonitorTaskRunner.sampleLoadingProgress());
@@ -238,7 +300,14 @@ public class LoadMonitor {
   }
 
   /**
-   * Return the the load monitor task runner state.
+   * @return The topic config provider.
+   */
+  public TopicConfigProvider topicConfigProvider() {
+    return _topicConfigProvider;
+  }
+
+  /**
+   * @return The load monitor task runner state.
    */
   public LoadMonitorTaskRunner.LoadMonitorTaskRunnerState taskRunnerState() {
     return _loadMonitorTaskRunner.state();
@@ -284,31 +353,66 @@ public class LoadMonitor {
   }
 
   /**
+   * @return The cluster information from Kafka metadata.
+   */
+  public Cluster kafkaCluster() {
+    return _metadataClient.cluster();
+  }
+
+  /**
    * Pause all the activities of the load monitor. The load monitor can only be paused when it is in
    * RUNNING state.
+   *
+   * @param reason The reason for pausing metric sampling.
    */
-  public void pauseMetricSampling() {
-    _loadMonitorTaskRunner.pauseSampling();
+  public void pauseMetricSampling(String reason) {
+    _loadMonitorTaskRunner.pauseSampling(reason);
   }
 
   /**
    * Resume the activities of the load monitor.
+   *
+   * @param reason The reason for resuming metric sampling.
    */
-  public void resumeMetricSampling() {
-    _loadMonitorTaskRunner.resumeSampling();
+  public void resumeMetricSampling(String reason) {
+    _loadMonitorTaskRunner.resumeSampling(reason);
   }
 
   /**
    * Acquire the semaphore for the cluster model generation.
+   * @param operationProgress the progress for the job.
+   * @return A new auto closeable semaphore for the cluster model generation.
    * @throws InterruptedException
    */
-  public AutoCloseableSemaphore acquireForModelGeneration() throws InterruptedException {
+  public AutoCloseableSemaphore acquireForModelGeneration(OperationProgress operationProgress)
+      throws InterruptedException {
     if (_acquiredClusterModelSemaphore.get()) {
       throw new IllegalStateException("The thread has already acquired the semaphore for cluster model generation.");
     }
+    WaitingForClusterModel step = new WaitingForClusterModel();
+    operationProgress.addStep(step);
     _clusterModelSemaphore.acquire();
     _acquiredClusterModelSemaphore.set(true);
+    step.done();
     return new AutoCloseableSemaphore();
+  }
+
+  /**
+   * Get the latest metric values of the brokers. The metric values are from the current active metric window.
+   *
+   * @return The latest metric values of brokers.
+   */
+  public Map<BrokerEntity, ValuesAndExtrapolations> currentBrokerMetricValues() {
+    return _brokerMetricSampleAggregator.peekCurrentWindow();
+  }
+
+  /**
+   * Get the latest metric values of the partitions. The metric values are from the current active metric window.
+   *
+   * @return The latest metric values of partitions.
+   */
+  public Map<PartitionEntity, ValuesAndExtrapolations> currentPartitionMetricValues() {
+    return _partitionMetricSampleAggregator.peekCurrentWindow();
   }
 
   /**
@@ -316,13 +420,17 @@ public class LoadMonitor {
    *
    * @param now The current time in millisecond.
    * @param requirements the load requirements for getting the cluster model.
-   * @return A cluster model with the configured number of snapshots whose timestamp is before given timestamp.
+   * @param operationProgress the progress to report.
+   * @return A cluster model with the configured number of windows whose timestamp is before given timestamp.
+   * @throws NotEnoughValidWindowsException If there is not enough sample to generate cluster model.
    */
-  public ClusterModel clusterModel(long now, ModelCompletenessRequirements requirements)
-      throws ModelInputException, NotEnoughValidSnapshotsException, NotEnoughSnapshotsException {
-    ClusterModel clusterModel = clusterModel(-1L, now, requirements);
+  public ClusterModel clusterModel(long now,
+                                   ModelCompletenessRequirements requirements,
+                                   OperationProgress operationProgress)
+      throws NotEnoughValidWindowsException {
+    ClusterModel clusterModel = clusterModel(DEFAULT_START_TIME_FOR_CLUSTER_MODEL, now, requirements, operationProgress);
     // Micro optimization: put the broker stats construction out of the lock.
-    ClusterModel.BrokerStats brokerStats = clusterModel.brokerStats();
+    BrokerStats brokerStats = clusterModel.brokerStats(_config);
     // update the cached brokerLoadStats
     synchronized (this) {
       _cachedBrokerLoadStats = brokerStats;
@@ -332,62 +440,101 @@ public class LoadMonitor {
   }
 
   /**
-   * Get the cluster load model for a time window. When there is
+   * Get the cluster load model for a time range.
    *
    * @param from start of the time window
    * @param to end of the time window
    * @param requirements the load completeness requirements.
+   * @param operationProgress the progress of the job to report.
    * @return A cluster model with the available snapshots whose timestamp is in the given window.
-   * @throws ModelInputException
-   * @throws NotEnoughValidSnapshotsException
-   * @throws NotEnoughSnapshotsException
+   * @throws NotEnoughValidWindowsException If there is not enough sample to generate cluster model.
    */
-  public ClusterModel clusterModel(long from, long to, ModelCompletenessRequirements requirements)
-      throws ModelInputException, NotEnoughValidSnapshotsException, NotEnoughSnapshotsException {
+  public ClusterModel clusterModel(long from,
+                                   long to,
+                                   ModelCompletenessRequirements requirements,
+                                   OperationProgress operationProgress)
+      throws NotEnoughValidWindowsException {
+    return clusterModel(from, to, requirements, false, operationProgress);
+  }
+
+  /**
+   * Get the cluster load model for a time range.
+   *
+   * @param from start of the time window
+   * @param to end of the time window
+   * @param requirements the load completeness requirements.
+   * @param populateReplicaPlacementInfo whether populate replica placement information.
+   * @param operationProgress the progress of the job to report.
+   * @return A cluster model with the available snapshots whose timestamp is in the given window.
+   * @throws NotEnoughValidWindowsException If there is not enough sample to generate cluster model.
+   */
+  public ClusterModel clusterModel(long from,
+                                   long to,
+                                   ModelCompletenessRequirements requirements,
+                                   boolean populateReplicaPlacementInfo,
+                                   OperationProgress operationProgress)
+      throws NotEnoughValidWindowsException {
     long start = System.currentTimeMillis();
 
     MetadataClient.ClusterAndGeneration clusterAndGeneration = _metadataClient.refreshMetadata();
-    Cluster kafkaCluster = clusterAndGeneration.cluster();
-    int totalNumPartitions = MonitorUtils.totalNumPartitions(kafkaCluster);
+    Cluster cluster = clusterAndGeneration.cluster();
 
     // Get the metric aggregation result.
-    MetricSampleAggregationResult metricSampleAggregationResult =
-        aggregateMetrics(from, to, clusterAndGeneration, requirements, totalNumPartitions);
-    Map<TopicPartition, Snapshot[]> loadSnapshots = metricSampleAggregationResult.snapshots();
+    MetricSampleAggregationResult<String, PartitionEntity> partitionMetricSampleAggregationResult =
+        _partitionMetricSampleAggregator.aggregate(cluster, from, to, requirements, operationProgress);
+    Map<PartitionEntity, ValuesAndExtrapolations> partitionValuesAndExtrapolations = partitionMetricSampleAggregationResult.valuesAndExtrapolations();
+    GeneratingClusterModel step = new GeneratingClusterModel(partitionValuesAndExtrapolations.size());
+    operationProgress.addStep(step);
 
     // Create an empty cluster model first.
-    long currentLoadGeneration = metricSampleAggregationResult.generation();
+    long currentLoadGeneration = partitionMetricSampleAggregationResult.generation();
     ModelGeneration modelGeneration = new ModelGeneration(clusterAndGeneration.generation(), currentLoadGeneration);
-    int numInvalidPartitions = requirements.includeAllTopics() ? metricSampleAggregationResult.invalidPartitions().size() : 0;
-    double monitoredPercentage = (double) (loadSnapshots.size() - numInvalidPartitions) / totalNumPartitions;
-    ClusterModel clusterModel = new ClusterModel(modelGeneration, monitoredPercentage);
+    MetricSampleCompleteness<String, PartitionEntity> completeness = partitionMetricSampleAggregationResult.completeness();
+    ClusterModel clusterModel = new ClusterModel(modelGeneration, completeness.validEntityRatio());
 
     final Timer.Context ctx = _clusterModelCreationTimer.time();
     try {
       // Create the racks and brokers.
-      for (Node node : kafkaCluster.nodes()) {
-        clusterModel.createRack(node.rack());
-        Map<Resource, Double> brokerCapacity =
-            _brokerCapacityConfigResolver.capacityForBroker(node.rack(), node.host(), node.id());
-        clusterModel.createBroker(node.rack(), node.host(), node.id(), brokerCapacity);
+      // Shuffle nodes before getting their capacity from the capacity resolver.
+      // This enables a capacity resolver to estimate the capacity of the nodes, for which the capacity retrieval has
+      // failed.
+      // The use case for this estimation is that if the capacity of one of the nodes is not available (e.g. due to some
+      // 3rd party service issue), the capacity resolver may want to use the capacity of a peer node as the capacity for
+      // that node.
+      // To this end, Cruise Control handles the case that the first node is problematic so the capacity resolver does
+      // not have the chance to get the capacity for the other nodes.
+      // Shuffling the node order helps, as the problematic node is unlikely to always be the first node in the list.
+      List<Node> shuffledNodes = new ArrayList<>(cluster.nodes());
+      Collections.shuffle(shuffledNodes);
+      for (Node node : shuffledNodes) {
+        // If the rack is not specified, we use the host info as rack info.
+        String rack = getRackHandleNull(node);
+        clusterModel.createRack(rack);
+        BrokerCapacityInfo brokerCapacity = _brokerCapacityConfigResolver.capacityForBroker(rack, node.host(), node.id());
+        LOG.debug("Get capacity info for broker {}: total capacity {}, capacity by logdir {}.",
+                  node.id(), brokerCapacity.capacity().get(Resource.DISK), brokerCapacity.diskCapacityByLogDir());
+        clusterModel.createBroker(rack, node.host(), node.id(), brokerCapacity, populateReplicaPlacementInfo);
       }
 
-      // populate snapshots for the cluster model.
-      for (Map.Entry<TopicPartition, Snapshot[]> entry : loadSnapshots.entrySet()) {
-        TopicPartition tp = entry.getKey();
-        Snapshot[] leaderLoadSnapshots = entry.getValue();
-        populateSnapshots(kafkaCluster, clusterModel, tp, leaderLoadSnapshots);
+      // Populate replica placement information for the cluster model if requested.
+      Map<TopicPartition, Map<Integer, String>> replicaPlacementInfo = null;
+      if (populateReplicaPlacementInfo) {
+        replicaPlacementInfo = getReplicaPlacementInfo(clusterModel, cluster, _adminClient, _config);
       }
 
-      // If the caller asks for all the topics and some of the partitions are missing, we need to fill empty
-      // snapshots for them.
-      if (requirements.includeAllTopics() && loadSnapshots.size() != totalNumPartitions) {
-        fillInMissingPartitions(loadSnapshots, kafkaCluster, clusterModel);
+      // Populate snapshots for the cluster model.
+      for (Map.Entry<PartitionEntity, ValuesAndExtrapolations> entry : partitionValuesAndExtrapolations.entrySet()) {
+        TopicPartition tp = entry.getKey().tp();
+        ValuesAndExtrapolations leaderLoad = entry.getValue();
+        populatePartitionLoad(cluster, clusterModel, tp, leaderLoad, replicaPlacementInfo, _brokerCapacityConfigResolver);
+        step.incrementPopulatedNumPartitions();
       }
+      // Set the state of bad brokers in clusterModel based on the Kafka cluster state.
+      setBadBrokerState(clusterModel, cluster);
 
-      // Get the dead brokers and mark them as dead.
-      deadBrokers(kafkaCluster).forEach(brokerId -> clusterModel.setBrokerState(brokerId, Broker.State.DEAD));
-      LOG.debug("Generated cluster model in {} ms", System.currentTimeMillis() - start);
+      if (LOG.isDebugEnabled()) {
+        LOG.debug("Generated cluster model in {} ms", System.currentTimeMillis() - start);
+      }
     } finally {
       ctx.stop();
     }
@@ -395,180 +542,105 @@ public class LoadMonitor {
   }
 
   /**
-   * Get the current cluster model generation. This is useful to avoid unnecessary cluster model creation which is
+   * @return The current cluster model generation. This is useful to avoid unnecessary cluster model creation which is
    * expensive.
    */
   public ModelGeneration clusterModelGeneration() {
     int clusterGeneration = _metadataClient.refreshMetadata().generation();
-    return new ModelGeneration(clusterGeneration, _metricSampleAggregator.currentGeneration());
+    return new ModelGeneration(clusterGeneration, _partitionMetricSampleAggregator.generation());
   }
 
   /**
    * Get the cached load.
-   * @return the cached load, null if the load
+   * @return The cached load, or null if (1) load or metadata is stale or (2) cached load violates capacity requirements.
    */
-  public ClusterModel.BrokerStats cachedBrokerLoadStats() {
-    int clusterGeneration = _metadataClient.refreshMetadata().generation();
-    synchronized (this) {
-      if (_cachedBrokerLoadGeneration != null
-          && clusterGeneration == _cachedBrokerLoadGeneration.clusterGeneration()
-          && _metricSampleAggregator.currentGeneration() == _cachedBrokerLoadGeneration.loadGeneration()) {
-        return _cachedBrokerLoadStats;
-      }
+  public synchronized BrokerStats cachedBrokerLoadStats(boolean allowCapacityEstimation) {
+    if (_cachedBrokerLoadGeneration != null
+        && (allowCapacityEstimation || !_cachedBrokerLoadStats.isBrokerStatsEstimated())
+        && _partitionMetricSampleAggregator.generation() == _cachedBrokerLoadGeneration.loadGeneration()
+        && _metadataClient.refreshMetadata().generation() == _cachedBrokerLoadGeneration.clusterGeneration()) {
+      return _cachedBrokerLoadStats;
     }
     return null;
   }
 
   /**
-   * Get all the active brokers in the cluster based on the partition assignment. If a metadata refresh failed due to
+   * Get all the active brokers in the cluster based on the replica assignment. If a metadata refresh failed due to
    * timeout, the current metadata information will be used. This is to handle the case that all the brokers are down.
    * @param timeout the timeout in milliseconds.
    * @return All the brokers in the cluster that has at least one replica assigned.
    */
-  public Set<Integer> brokersWithPartitions(long timeout) {
+  public Set<Integer> brokersWithReplicas(long timeout) {
     Cluster kafkaCluster = _metadataClient.refreshMetadata(timeout).cluster();
-    return brokersWithPartitions(kafkaCluster);
+    return MonitorUtils.brokersWithReplicas(kafkaCluster);
   }
 
   /**
-   * Check whether the monitored load meets the load requirements.
+   * Refresh the cluster metadata and get the corresponding cluster and generation information.
+   *
+   * @return Cluster and generation information after refreshing the cluster metadata.
    */
-  public boolean meetLoadRequirements(ModelCompletenessRequirements requirements) {
+  public MetadataClient.ClusterAndGeneration refreshClusterAndGeneration() {
+    return _metadataClient.refreshMetadata();
+  }
+
+  /**
+   * @return True if the monitored load meets the given completeness requirements, false otherwise.
+   */
+  public boolean meetCompletenessRequirements(Cluster cluster, ModelCompletenessRequirements requirements) {
+    int numValidWindows =
+        _partitionMetricSampleAggregator.validWindows(cluster, requirements.minMonitoredPartitionsPercentage()).size();
+    int requiredNumValidWindows = requirements.minRequiredNumWindows();
+    return numValidWindows >= requiredNumValidWindows;
+  }
+
+  /**
+   * @return True if the monitored load meets the load requirements, false otherwise.
+   */
+  public boolean meetCompletenessRequirements(ModelCompletenessRequirements requirements) {
     MetadataClient.ClusterAndGeneration clusterAndGeneration = _metadataClient.refreshMetadata();
-    int availableNumSnapshots = getAvailableNumSnapshots(clusterAndGeneration,
-                                                         requirements.minMonitoredPartitionsPercentage(),
-                                                         MonitorUtils.totalNumPartitions(clusterAndGeneration.cluster()));
-    int requiredSnapshot = requirements.minRequiredNumSnapshotWindows();
-    return availableNumSnapshots >= requiredSnapshot;
+    return meetCompletenessRequirements(clusterAndGeneration.cluster(), requirements);
   }
 
   /**
-   * Get the metric aggregation result from the metrics aggregator.
-   *
-   * The method is package private and static to facilitate testing..
+   * @return All the available broker level metrics. Null is returned if nothing is available.
    */
-  private MetricSampleAggregationResult aggregateMetrics(long from,
-                                                         long to,
-                                                         MetadataClient.ClusterAndGeneration clusterAndGeneration,
-                                                         ModelCompletenessRequirements requirements,
-                                                         int totalNumPartitions)
-      throws NotEnoughValidSnapshotsException, NotEnoughSnapshotsException {
-    double minMonitoredPartitionsPercentage = requirements.minMonitoredPartitionsPercentage();
-    int requiredNumSnapshotWindows = requirements.minRequiredNumSnapshotWindows();
-    boolean includeAllTopics = requirements.includeAllTopics();
-
-    // We need this while loop because it is possible that after we get an available number of partitions a new
-    // window may be rolled out so we may get less valid partitions in the actually returned result. In this case
-    // we will just retry, but this case should be rare.
-    MetricSampleAggregationResult metricSampleAggregationResult = null;
-    while (metricSampleAggregationResult == null) {
-      int availableNumSnapshots = getAvailableNumSnapshots(clusterAndGeneration,
-                                                           minMonitoredPartitionsPercentage,
-                                                           totalNumPartitions);
-      int numWindowsInRange = _metricCompletenessChecker.numWindows(from, to);
-      availableNumSnapshots = Math.min(availableNumSnapshots, numWindowsInRange);
-      if (availableNumSnapshots < requiredNumSnapshotWindows || numWindowsInRange < requiredNumSnapshotWindows) {
-        throw new NotEnoughValidSnapshotsException(
-            "The cluster model generation requires " + requiredNumSnapshotWindows + " snapshots with minimum " +
-                "monitored partitions percentage of " + minMonitoredPartitionsPercentage
-                + ". But there are only " + availableNumSnapshots + " valid snapshots available.");
-      }
-
-      metricSampleAggregationResult = _metricSampleAggregator.snapshots(clusterAndGeneration.cluster(),
-                                                                        from,
-                                                                        to,
-                                                                        availableNumSnapshots,
-                                                                        includeAllTopics);
-      // Check if the monitored partition percentage is met. If not, we retry get the metric aggregation result.
-      if (metricSampleAggregationResult.snapshots().size() < totalNumPartitions * minMonitoredPartitionsPercentage) {
-        metricSampleAggregationResult = null;
-      }
+  public MetricSampleAggregationResult<String, BrokerEntity> brokerMetrics() {
+    List<Node> nodes = _metadataClient.cluster().nodes();
+    Set<BrokerEntity> brokerEntities = new HashSet<>(nodes.size());
+    for (Node node : nodes) {
+      brokerEntities.add(new BrokerEntity(node.host(), node.id()));
     }
-    return metricSampleAggregationResult;
+    return _brokerMetricSampleAggregator.aggregate(brokerEntities);
   }
 
   /**
-   * Add empty load of all the partitions that exists in the current cluster but missing from the
-   * metric aggregation result.
+   * Package private for unit test.
    */
-  private void fillInMissingPartitions(Map<TopicPartition, Snapshot[]> loadSnapshots,
-                                              Cluster kafkaCluster,
-                                              ClusterModel clusterModel) throws ModelInputException {
-    // There must be at least one entry, otherwise there will be exception thrown earlier. So we don't need to
-    // check if it has next
-    Snapshot[] snapshotsForTimestamps = loadSnapshots.values().iterator().next();
-    Snapshot[] emptyLoadSnapshots = new Snapshot[snapshotsForTimestamps.length];
-    for (int i = 0; i < emptyLoadSnapshots.length; i++) {
-      emptyLoadSnapshots[i] = new Snapshot(snapshotsForTimestamps[i].time());
-    }
-    for (Node node : kafkaCluster.nodes()) {
-      for (PartitionInfo partitionInfo : kafkaCluster.partitionsForNode(node.id())) {
-        TopicPartition tp = new TopicPartition(partitionInfo.topic(), partitionInfo.partition());
-        if (!loadSnapshots.containsKey(tp)) {
-          populateSnapshots(kafkaCluster, clusterModel, tp, emptyLoadSnapshots);
-        }
-      }
-    }
+  KafkaPartitionMetricSampleAggregator partitionSampleAggregator() {
+    return _partitionMetricSampleAggregator;
   }
 
   /**
-   * Get the number of available snapshots which meets the cluster model completeness requirement.
-   *
-   * @param clusterAndGeneration The kafka cluster and metadata generation.
-   * @param minMonitoredPartitionPercentage the required partition coverage.
-   * @param totalNumPartitions the total number of partitions. We can actually get this from the cluster info. But
-   *                           we choose to pass it in to void recalculate every time.
-   * @return the number of available snapshots that meets the coverage requirement.
+   * Get all the dead brokers in the cluster based on the replica assignment. If a metadata refresh failed due to
+   * timeout, the current metadata information will be used. This is to handle the case that all the brokers are down.
+   * @param timeout the timeout in milliseconds.
+   * @return All the dead brokers which host some replicas in the cluster.
    */
-  private int getAvailableNumSnapshots(MetadataClient.ClusterAndGeneration clusterAndGeneration,
-                                      double minMonitoredPartitionPercentage,
-                                      int totalNumPartitions) {
-    ModelGeneration modelGeneration = new ModelGeneration(clusterAndGeneration.generation(),
-                                                          _metricSampleAggregator.currentGeneration());
-    Cluster kafkaCluster = clusterAndGeneration.cluster();
-    return _metricCompletenessChecker.numValidWindows(modelGeneration,
-                                                      kafkaCluster,
-                                                      minMonitoredPartitionPercentage,
-                                                      totalNumPartitions);
+  public Set<Integer> deadBrokersWithReplicas(long timeout) {
+    Cluster kafkaCluster = _metadataClient.refreshMetadata(timeout).cluster();
+    return MonitorUtils.deadBrokersWithReplicas(kafkaCluster);
   }
 
-  private void populateSnapshots(Cluster kafkaCluster,
-                                 ClusterModel clusterModel,
-                                 TopicPartition tp,
-                                 Snapshot[] leaderLoadSnapshots) throws ModelInputException {
-    PartitionInfo partitionInfo = kafkaCluster.partition(tp);
-    // If partition info does not exist, the topic may have been deleted.
-    if (partitionInfo != null) {
-      for (Node replica : partitionInfo.replicas()) {
-        boolean isLeader = partitionInfo.leader() != null && replica.id() == partitionInfo.leader().id();
-        Map<Resource, Double> brokerCapacity =
-            _brokerCapacityConfigResolver.capacityForBroker(replica.rack(), replica.host(), replica.id());
-        clusterModel.createReplicaHandleDeadBroker(replica.rack(), replica.id(), tp, isLeader, brokerCapacity);
-        // Push the load snapshot to the replica one by one.
-        for (int i = 0; i < leaderLoadSnapshots.length; i++) {
-          clusterModel.pushLatestSnapshot(replica.rack(), replica.id(), tp,
-                                          isLeader ? leaderLoadSnapshots[i].duplicate() : MonitorUtils.toFollowerSnapshot(leaderLoadSnapshots[i]));
-        }
-      }
-    }
-  }
-
-  private Set<Integer> brokersWithPartitions(Cluster kafkaCluster) {
-    Set<Integer> allBrokers = new HashSet<>();
-    for (String topic : kafkaCluster.topics()) {
-      for (PartitionInfo pi : kafkaCluster.partitionsForTopic(topic)) {
-        for (Node node : pi.replicas()) {
-          allBrokers.add(node.id());
-        }
-      }
-    }
-    return allBrokers;
-  }
-
-  private Set<Integer> deadBrokers(Cluster kafkaCluster) {
-    Set<Integer> brokersWithPartitions = brokersWithPartitions(kafkaCluster);
-    kafkaCluster.nodes().forEach(node -> brokersWithPartitions.remove(node.id()));
-    return brokersWithPartitions;
+  /**
+   * Get all the brokers having offline replca in the cluster based on the partition assignment. If a metadata refresh failed
+   * due to timeout, the current metadata information will be used. This is to handle the case that all the brokers are down.
+   * @param timeout the timeout in milliseconds.
+   * @return All the brokers in the cluster that has at least one offline replica.
+   */
+  public Set<Integer> brokersWithOfflineReplicas(long timeout) {
+    Cluster kafkaCluster = _metadataClient.refreshMetadata(timeout).cluster();
+    return MonitorUtils.brokersWithOfflineReplicas(kafkaCluster);
   }
 
   private int numValidSnapshotWindows() {
@@ -583,32 +655,32 @@ public class LoadMonitor {
     return _lastUpdate + SensorUpdater.UPDATE_TIMEOUT_MS > System.currentTimeMillis() ? _monitoredPartitionsPercentage : 0.0;
   }
 
-  private int numPartitionsWithFlaw() {
-    return _lastUpdate + SensorUpdater.UPDATE_TIMEOUT_MS > System.currentTimeMillis() ? _numPartitionsWithFlaw : -1;
+  private int numPartitionsWithExtrapolations() {
+    return _lastUpdate + SensorUpdater.UPDATE_TIMEOUT_MS > System.currentTimeMillis() ? _numPartitionsWithExtrapolations : -1;
   }
 
   private double getMonitoredPartitionsPercentage() {
     MetadataClient.ClusterAndGeneration clusterAndGeneration = _metadataClient.refreshMetadata();
 
     Cluster kafkaCluster = clusterAndGeneration.cluster();
-    MetricSampleAggregationResult metricSampleAggregationResult;
+    MetricSampleAggregationResult<String, PartitionEntity> metricSampleAggregationResult;
     try {
-      metricSampleAggregationResult = _metricSampleAggregator.recentSnapshots(kafkaCluster, System.currentTimeMillis());
-    } catch (NotEnoughSnapshotsException e) {
+      metricSampleAggregationResult = _partitionMetricSampleAggregator.aggregate(kafkaCluster,
+                                                                                 System.currentTimeMillis(),
+                                                                                 new OperationProgress());
+    } catch (NotEnoughValidWindowsException e) {
       return 0.0;
     }
-    Map<TopicPartition, Snapshot[]> loadSnapshots = metricSampleAggregationResult.snapshots();
-    _numPartitionsWithFlaw = metricSampleAggregationResult.sampleFlaws().keySet().size();
+    Map<PartitionEntity, ValuesAndExtrapolations> partitionLoads = metricSampleAggregationResult.valuesAndExtrapolations();
+    AtomicInteger numPartitionsWithExtrapolations = new AtomicInteger(0);
+    partitionLoads.values().forEach(valuesAndExtrapolations -> {
+      if (!valuesAndExtrapolations.extrapolations().isEmpty()) {
+        numPartitionsWithExtrapolations.incrementAndGet();
+      }
+    });
+    _numPartitionsWithExtrapolations = numPartitionsWithExtrapolations.get();
     int totalNumPartitions = MonitorUtils.totalNumPartitions(kafkaCluster);
-    return totalNumPartitions > 0 ? (double) loadSnapshots.size() / totalNumPartitions : 0.0;
-  }
-
-  /**
-   * Basically a data dump of the current state of the metrics aggregator.
-   * @return a non-null, unmodifiable map
-   */
-  public SortedMap<Long, Map<TopicPartition, Snapshot>> currentSnapshots() {
-    return _metricSampleAggregator.currentSnapshots();
+    return totalNumPartitions > 0 ? metricSampleAggregationResult.completeness().validEntityRatio() : 0.0;
   }
 
   /**
@@ -626,11 +698,11 @@ public class LoadMonitor {
       try {
         MetadataClient.ClusterAndGeneration clusterAndGeneration = _metadataClient.clusterAndGeneration();
         double minMonitoredPartitionsPercentage = _defaultModelCompletenessRequirements.minMonitoredPartitionsPercentage();
-        int totalNumPartitions = MonitorUtils.totalNumPartitions(clusterAndGeneration.cluster());
-        _numValidSnapshotWindows =
-            getAvailableNumSnapshots(clusterAndGeneration, minMonitoredPartitionsPercentage, totalNumPartitions);
+        _numValidSnapshotWindows = _partitionMetricSampleAggregator.validWindows(clusterAndGeneration.cluster(),
+                                                                                 minMonitoredPartitionsPercentage)
+                                                                   .size();
         _monitoredPartitionsPercentage = getMonitoredPartitionsPercentage();
-        _totalMonitoredSnapshotWindows = _metricSampleAggregator.snapshotWindows().size();
+        _totalMonitoredSnapshotWindows = _partitionMetricSampleAggregator.allWindows().size();
         _lastUpdate = System.currentTimeMillis();
       } catch (Throwable t) {
         // We catch all the throwables because we don't want the sensor updater to die
@@ -639,11 +711,39 @@ public class LoadMonitor {
     }
   }
 
-  public class AutoCloseableSemaphore implements AutoCloseable {
+  /**
+   * Background task to clean up the partition metric samples in case of topic deletion.
+   *
+   * Due to Kafka bugs, the returned metadata may not contain all the topics during broker bounce.
+   * To handle that, we refresh metadata a few times and take a union of all the topics seen as the existing topics
+   * -- in intervals of ({@link #CHECK_INTERVAL_MS} * {@link #REFRESH_LIMIT}).
+   */
+  private class PartitionMetricSampleAggregatorCleaner implements Runnable {
+    static final long CHECK_INTERVAL_MS = 37500;
+    static final short REFRESH_LIMIT = 8;
+    // A set remember all the topics seen from last metadata refresh.
+    private final Set<String> _allTopics = new HashSet<>();
+    // The metadata refresh count.
+    private int _refreshCount = 0;
     @Override
-    public void close() throws Exception {
-      _clusterModelSemaphore.release();
-      _acquiredClusterModelSemaphore.set(false);
+    public void run() {
+      _allTopics.addAll(_metadataClient.refreshMetadata().cluster().topics());
+      _refreshCount++;
+      if (_refreshCount % REFRESH_LIMIT == 0) {
+        _partitionMetricSampleAggregator.retainEntityGroup(_allTopics);
+        _allTopics.clear();
+      }
+    }
+  }
+
+  public class AutoCloseableSemaphore implements AutoCloseable {
+    private AtomicBoolean _closed = new AtomicBoolean(false);
+    @Override
+    public void close() {
+      if (_closed.compareAndSet(false, true)) {
+        _clusterModelSemaphore.release();
+        _acquiredClusterModelSemaphore.set(false);
+      }
     }
   }
 

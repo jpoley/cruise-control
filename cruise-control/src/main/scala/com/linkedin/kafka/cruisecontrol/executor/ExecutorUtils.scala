@@ -1,14 +1,16 @@
 /*
- * Copyright 2017 LinkedIn Corp. Licensed under the BSD 2-Clause License (the "License").  See License in the project root for license information.
+ * Copyright 2017 LinkedIn Corp. Licensed under the BSD 2-Clause License (the "License"). See License in the project root for license information.
  */
 
 package com.linkedin.kafka.cruisecontrol.executor
 
-import kafka.admin.{PreferredReplicaLeaderElectionCommand, ReassignPartitionsCommand}
-import kafka.common.TopicAndPartition
-import kafka.utils.ZkUtils
+import java.util
+import java.util.Properties
+
+import kafka.admin.PreferredReplicaLeaderElectionCommand
+import kafka.zk.{AdminZkClient, KafkaZkClient, ZkVersion}
 import org.apache.kafka.common.TopicPartition
-import org.slf4j.LoggerFactory
+import org.slf4j.{Logger, LoggerFactory}
 
 import scala.collection.JavaConversions._
 
@@ -17,112 +19,120 @@ import scala.collection.JavaConversions._
  * scala classes and Java classes are not compatible.
  */
 object ExecutorUtils {
-  val LOG = LoggerFactory.getLogger(ExecutorUtils.getClass.getName)
+  val LOG: Logger = LoggerFactory.getLogger(ExecutorUtils.getClass.getName)
 
   /**
-   * Add a list of partition movement tasks to execute.
+   * Add a list of replica reassignment tasks to execute. Replica reassignment indicates tasks that (1) relocate a replica
+   * within the cluster, (2) introduce a new replica to the cluster (3) remove an existing replica from the cluster.
    *
-   * @param zkUtils the ZkUtils class to use for partition reasignment.
-   * @param tasks
+   * @param kafkaZkClient the KafkaZkClient class to use for partition reassignment.
+   * @param reassignmentTasks Replica reassignment tasks to be executed.
    */
-  def executePartitionMovementTasks(zkUtils: ZkUtils,
-                                    tasks: java.util.List[ExecutionTask]) {
-    if (tasks != null && !tasks.isEmpty) {
-      val inProgressPartitionMovement = zkUtils.getPartitionsBeingReassigned()
-      // Add the partition being assigned to the newPartitionAssignment because we are going to add the new
+  def executeReplicaReassignmentTasks(kafkaZkClient: KafkaZkClient,
+                                      reassignmentTasks: java.util.List[ExecutionTask]) {
+    if (reassignmentTasks != null && !reassignmentTasks.isEmpty) {
+      val inProgressReplicaReassignment = kafkaZkClient.getPartitionReassignment
+      // Add the partition being assigned to the newReplicaAssignment because we are going to add the new
       // reassignment together.
-      val newPartitionAssignment = scala.collection.mutable.Map(inProgressPartitionMovement.map { case (topicPartition, context) =>
-        topicPartition -> context.newReplicas
-      }.toSeq: _*)
-      tasks.foreach({ task =>
-        val topic = task.proposal.topic
-        val partition = task.proposal.partitionId
-        val tp = TopicAndPartition(topic, partition)
-        val sourceBroker = task.sourceBrokerId()
-        val destinationBroker = task.destinationBrokerId()
+      val newReplicaAssignment = scala.collection.mutable.Map(inProgressReplicaReassignment.toSeq: _*)
+      reassignmentTasks.foreach({ task =>
+        val tp = task.proposal.topicPartition()
+        val oldReplicas = asScalaBuffer(task.proposal.oldReplicas()).map(_.brokerId.toInt)
+        val newReplicas = asScalaBuffer(task.proposal().newReplicas()).map(_.brokerId.toInt)
 
-        val inProgressReplicasOpt = newPartitionAssignment.get(tp)
+        val inProgressReplicasOpt = newReplicaAssignment.get(tp)
         var addTask = true
-        val newReplicas = inProgressReplicasOpt match {
+        val replicasToWrite = inProgressReplicasOpt match {
           case Some(inProgressReplicas) =>
-            // verify with in progress assignment
-            if (inProgressReplicas.contains(destinationBroker))
-              throw new RuntimeException(s"Broker $destinationBroker is already being assigned as a replica for [$topic, $partition]")
-            if (!inProgressReplicas.contains(sourceBroker))
-              throw new RuntimeException(s"Broker $sourceBroker is not assigned as a replica in previous partition movement for [$topic, $partition]")
-            (inProgressReplicas :+ destinationBroker).filter(_ != sourceBroker)
-          case None =>
-            // verify with current assignment
-            val currentReplicaAssignment = zkUtils.getReplicasForPartition(topic, partition)
-            if (currentReplicaAssignment.isEmpty)
-              throw new RuntimeException(s"The partition $partition does not exist.")
-
-            if (!currentReplicaAssignment.contains(destinationBroker)) {
-              if (currentReplicaAssignment.contains(sourceBroker)) {
-                // this is a normal movement.
-                (currentReplicaAssignment :+ destinationBroker).filter(_ != sourceBroker)
-              } else {
-                // The replica list should have at least one of the source broker or destination broker.
-                throw new RuntimeException(s"Broker $sourceBroker is not a replica of [$topic, $partition].")
+            if (task.state() == ExecutionTask.State.ABORTING) {
+              oldReplicas
+            } else if (task.state() == ExecutionTask.State.DEAD
+              || task.state() == ExecutionTask.State.ABORTED
+              || task.state() == ExecutionTask.State.COMPLETED) {
+              addTask = false
+              Seq.empty
+            } else if (task.state() == ExecutionTask.State.IN_PROGRESS) {
+              if (!newReplicas.equals(inProgressReplicas)) {
+                throw new RuntimeException(s"The provided new replica list $newReplicas" +
+                  s"is different from the in progress replica list $inProgressReplicas for $tp")
               }
+              newReplicas
             } else {
-              if (currentReplicaAssignment.contains(sourceBroker)) {
-                // The destination broker is already in the list, we just need to filter out the source broker if
-                // it exists.
-                currentReplicaAssignment.filter(_ != sourceBroker)
-              } else {
-                // If the source broker is no longer in the list, just do not add the task to the reassignment.
+              throw new IllegalStateException(s"Should never be here, the state is ${task.state()}")
+            }
+          case None =>
+            if (task.state() == ExecutionTask.State.ABORTED
+              || task.state() == ExecutionTask.State.DEAD
+              || task.state() == ExecutionTask.State.ABORTING
+              || task.state() == ExecutionTask.State.COMPLETED) {
+              LOG.warn(s"No need to abort tasks $task because the partition is not in reassignment")
+              addTask = false
+              Seq.empty
+            } else {
+              // verify with current assignment
+              val currentReplicaAssignment = kafkaZkClient.getReplicasForPartition(tp)
+              if (currentReplicaAssignment.isEmpty) {
+                LOG.warn(s"The partition $tp does not exist.")
                 addTask = false
-                currentReplicaAssignment
+                Seq.empty
+              } else {
+                // we are not verifying the old replicas because the we may be reexecuting a task,
+                // in which case the replica list could be different from the old replicas.
+                newReplicas
               }
             }
         }
         if (addTask)
-          newPartitionAssignment += (tp -> newReplicas)
+          newReplicaAssignment += (tp -> replicasToWrite)
       })
 
       // We do not use the ReassignPartitionsCommand here because we want to have incremental partition movement.
-      if (newPartitionAssignment.nonEmpty)
-        zkUtils.updatePartitionReassignmentData(newPartitionAssignment)
+      if (newReplicaAssignment.nonEmpty)
+        kafkaZkClient.setOrCreatePartitionReassignment(newReplicaAssignment, ZkVersion.MatchAnyVersion)
     }
   }
 
-  def adjustReplicaOrderBeforeLeaderMovements(zkUtils: ZkUtils,
-                                              tasks: java.util.List[ExecutionTask]) {
-    val inProgressPartitionMovement = zkUtils.getPartitionsBeingReassigned()
-    if (inProgressPartitionMovement.nonEmpty)
-      throw new IllegalStateException("The partition movements should have finished before leader movements start.")
-
-    val newReplicaAssignment = tasks.map { task =>
-      val topic = task.proposal.topic
-      val partition = task.proposal.partitionId
-      val tp = TopicAndPartition(topic, partition)
-      val destinationBroker = task.destinationBrokerId()
-
-      val currentAssignment = zkUtils.getReplicasForPartition(topic, partition)
-      val replicasWithoutLeader = currentAssignment.filter(_ != destinationBroker)
-      if (currentAssignment.size != replicasWithoutLeader.size + 1)
-        throw new IllegalStateException(s"Current replicas $currentAssignment for $tp does not contain new " +
-          s"leader $destinationBroker")
-      val newReplicas = destinationBroker +: replicasWithoutLeader
-      tp -> newReplicas
-    }.toMap
-
-    val reassignPartitionCommand = new ReassignPartitionsCommand(zkUtils, newReplicaAssignment)
-    if (!reassignPartitionCommand.reassignPartitions())
-      throw new RuntimeException(s"partition assignment for $newReplicaAssignment failed because of ZK write failure")
-  }
-
-  def executePreferredLeaderElection(zkUtils: ZkUtils,
-                                     tasks: java.util.List[ExecutionTask]) {
+  def executePreferredLeaderElection(kafkaZkClient: KafkaZkClient, tasks: java.util.List[ExecutionTask]) {
     val partitionsToExecute = tasks.map(task =>
-      TopicAndPartition(task.proposal.topic, task.proposal.partitionId)).toSet
+      new TopicPartition(task.proposal.topic, task.proposal.partitionId)).toSet
 
-    val preferredReplicaElectionCommand = new PreferredReplicaLeaderElectionCommand(zkUtils, partitionsToExecute)
+    val preferredReplicaElectionCommand = new PreferredReplicaLeaderElectionCommand(kafkaZkClient, partitionsToExecute)
     preferredReplicaElectionCommand.moveLeaderToPreferredReplica()
   }
 
-  def partitionsBeingReassigned(zkUtils: ZkUtils) = {
-    setAsJavaSet(zkUtils.getPartitionsBeingReassigned().keys.map(tap => new TopicPartition(tap.topic, tap.partition)).toSet)
+  def partitionsBeingReassigned(kafkaZkClient: KafkaZkClient): util.Set[TopicPartition] = {
+    setAsJavaSet(kafkaZkClient.getPartitionReassignment.keys.toSet)
+  }
+
+  def ongoingLeaderElection(kafkaZkClient: KafkaZkClient): util.Set[TopicPartition] = {
+    setAsJavaSet(kafkaZkClient.getPreferredReplicaElection)
+  }
+
+  def newAssignmentForPartition(kafkaZkClient: KafkaZkClient, tp : TopicPartition): java.util.List[Integer] = {
+    val inProgressReassignment =
+      kafkaZkClient.getPartitionReassignment.getOrElse(new TopicPartition(tp.topic(), tp.partition()),
+      throw new NoSuchElementException(s"Partition $tp is not being reassigned."))
+
+    seqAsJavaList(inProgressReassignment.map(i => i : java.lang.Integer))
+  }
+
+  def currentReplicasForPartition(kafkaZkClient: KafkaZkClient, tp: TopicPartition): java.util.List[java.lang.Integer] = {
+    seqAsJavaList(kafkaZkClient.getReplicasForPartition(new TopicPartition(tp.topic(), tp.partition())).map(i => i : java.lang.Integer))
+  }
+
+  def changeBrokerConfig(adminZkClient: AdminZkClient, brokerId: Int, config: Properties): Unit = {
+    adminZkClient.changeBrokerConfig(Some(brokerId), config)
+  }
+
+  def changeTopicConfig(adminZkClient: AdminZkClient, topic: String, config: Properties): Unit = {
+    adminZkClient.changeTopicConfig(topic, config)
+  }
+
+  def getAllLiveBrokerIdsInCluster(kafkaZkClient: KafkaZkClient): java.util.List[java.lang.Integer] = {
+    seqAsJavaList(kafkaZkClient.getAllBrokersInCluster.map(_.id : java.lang.Integer))
+  }
+
+  def getAllTopicsInCluster(kafkaZkClient: KafkaZkClient): java.util.List[String] = {
+    seqAsJavaList(kafkaZkClient.getAllTopicsInCluster)
   }
 }

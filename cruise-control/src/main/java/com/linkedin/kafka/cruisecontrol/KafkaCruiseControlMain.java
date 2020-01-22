@@ -1,71 +1,83 @@
 /*
- * Copyright 2017 LinkedIn Corp. Licensed under the BSD 2-Clause License (the "License").  See License in the project root for license information.
+ * Copyright 2017 LinkedIn Corp. Licensed under the BSD 2-Clause License (the "License"). See License in the project root for license information.
  */
 
 package com.linkedin.kafka.cruisecontrol;
 
 import com.linkedin.kafka.cruisecontrol.config.KafkaCruiseControlConfig;
-import com.linkedin.kafka.cruisecontrol.servlet.KafkaCruiseControlServlet;
+import com.linkedin.kafka.cruisecontrol.config.constants.WebServerConfig;
+
 import java.io.FileInputStream;
+import java.io.IOException;
 import java.io.InputStream;
 import java.util.Properties;
-import org.eclipse.jetty.server.Server;
-import org.eclipse.jetty.servlet.ServletContextHandler;
-import org.eclipse.jetty.servlet.ServletHolder;
-
 
 /**
  * The main class to run Kafka Cruise Control.
  */
 public class KafkaCruiseControlMain {
 
-  private KafkaCruiseControlMain() {
+  private KafkaCruiseControlMain() { }
 
-  }
-
+  /**
+   * The main function to run Cruise Control.
+   * @param args Arguments passed while starting Cruise Control.
+   */
   public static void main(String[] args) throws Exception {
-    // Check the command line arguments.
     if (args.length == 0) {
       printErrorMessageAndDie();
     }
+    try {
+      KafkaCruiseControlConfig config = readConfig(args[0]);
+      Integer port = parsePort(args, config);
+      String hostname = parseHostname(args, config);
+      KafkaCruiseControlApp app = new KafkaCruiseControlApp(config, port, hostname);
+      app.registerShutdownHook();
+      app.start();
+    } catch (IOException | IllegalArgumentException e) {
+      printErrorMessageAndDie();
+    }
+  }
 
-    // Load all the properties.
+  private static KafkaCruiseControlConfig readConfig(String propertiesFile) throws IOException {
     Properties props = new Properties();
-    try (InputStream propStream = new FileInputStream(args[0])) {
+    try (InputStream propStream = new FileInputStream(propertiesFile)) {
       props.load(propStream);
     }
 
-    int port = 9090;
-    if (args.length > 1) {
-      try {
+    return new KafkaCruiseControlConfig(props);
+  }
+
+  private static Integer parsePort(String[] args, KafkaCruiseControlConfig config) {
+    Integer port = null;
+    try {
+      if (args.length > 1) {
         port = Integer.parseInt(args[1]);
-      } catch (Exception e) {
-        printErrorMessageAndDie();
+      } else {
+        return config.getInt(WebServerConfig.WEBSERVER_HTTP_PORT_CONFIG);
       }
+    } catch (Exception e) {
+      printErrorMessageAndDie();
     }
+    return port;
+  }
 
-    KafkaCruiseControl kafkaCruiseControl = new KafkaCruiseControl(new KafkaCruiseControlConfig(props));
-
-    Server server = new Server(port);
-    ServletContextHandler context = new ServletContextHandler(ServletContextHandler.SESSIONS);
-    context.setContextPath("/");
-    server.setHandler(context);
-    KafkaCruiseControlServlet kafkaCruiseControlServlet = new KafkaCruiseControlServlet(kafkaCruiseControl);
-    ServletHolder servletHolder = new ServletHolder(kafkaCruiseControlServlet);
-    context.addServlet(servletHolder, "/kafkacruisecontrol/*");
-    Runtime.getRuntime().addShutdownHook(new Thread() {
-      @Override
-      public void run() {
-        kafkaCruiseControl.shutdown();
+  private static String parseHostname(String[] args, KafkaCruiseControlConfig config) {
+    String hostname = null;
+    try {
+      if (args.length > 2) {
+        hostname = args[2];
+      } else {
+        return config.getString(WebServerConfig.WEBSERVER_HTTP_ADDRESS_CONFIG);
       }
-    });
-    kafkaCruiseControl.startUp();
-    server.start();
-    System.out.println("Kafka Cruise Control started.");
+    } catch (Exception e) {
+      printErrorMessageAndDie();
+    }
+    return hostname;
   }
 
   private static void printErrorMessageAndDie() {
-    System.out.println(String.format("USAGE: java %s cruisecontrol.properties [port]", KafkaCruiseControlMain.class.getSimpleName()));
+    System.out.println(String.format("USAGE: java %s cruisecontrol.properties [port] [ipaddress|hostname]", KafkaCruiseControlMain.class.getSimpleName()));
     System.exit(-1);
   }
 }

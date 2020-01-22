@@ -1,23 +1,18 @@
 /*
- * Copyright 2017 LinkedIn Corp. Licensed under the BSD 2-Clause License (the "License").  See License in the project root for license information.
+ * Copyright 2017 LinkedIn Corp. Licensed under the BSD 2-Clause License (the "License"). See License in the project root for license information.
  */
 
 package com.linkedin.kafka.cruisecontrol.model;
 
-import com.linkedin.kafka.cruisecontrol.CruiseControlUnitTestUtils;
-import com.linkedin.kafka.cruisecontrol.config.KafkaCruiseControlConfig;
-import com.linkedin.kafka.cruisecontrol.common.DeterministicCluster;
 import com.linkedin.kafka.cruisecontrol.common.Resource;
+import com.linkedin.kafka.cruisecontrol.common.DeterministicCluster;
 import com.linkedin.kafka.cruisecontrol.common.TestConstants;
-import com.linkedin.kafka.cruisecontrol.exception.AnalysisInputException;
-import com.linkedin.kafka.cruisecontrol.exception.ModelInputException;
 
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.HashMap;
 import java.util.Map;
 
-import java.util.Properties;
 import org.apache.kafka.common.TopicPartition;
 import org.junit.Test;
 import org.junit.runner.RunWith;
@@ -34,18 +29,11 @@ import static org.junit.Assert.fail;
 public class LoadConsistencyTest {
   /**
    * Populate parameters for the parametrized test.
+   * @return Populated parameters.
    */
   @Parameterized.Parameters
-  public static Collection<Object[]> data()
-      throws AnalysisInputException, ModelInputException {
+  public static Collection<Object[]> data() {
     Collection<Object[]> params = new ArrayList<>();
-
-    int numSnapshots = 1;
-    if (!Load.initialized()) {
-      Properties props = CruiseControlUnitTestUtils.getCruiseControlProperties();
-      props.setProperty(KafkaCruiseControlConfig.NUM_LOAD_SNAPSHOTS_CONFIG, Integer.toString(numSnapshots));
-      Load.init(new KafkaCruiseControlConfig(props));
-    }
 
     Map<Resource, Double> brokerCapacity = new HashMap<>();
     brokerCapacity.put(Resource.CPU, TestConstants.LARGE_BROKER_CAPACITY);
@@ -118,15 +106,14 @@ public class LoadConsistencyTest {
   }
 
   @Test
-  public void test()
-      throws ModelInputException {
+  public void test() {
     if (_shouldPassSanityCheck) {
       _clusterModel.sanityCheck();
     } else {
       try {
         _clusterModel.sanityCheck();
-        fail("Should throw ModelInputException");
-      } catch (ModelInputException mie) {
+        fail("Should throw IllegalArgumentException");
+      } catch (IllegalArgumentException mie) {
         // Let it go.
       }
     }

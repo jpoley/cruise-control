@@ -1,25 +1,29 @@
 /*
- * Copyright 2017 LinkedIn Corp. Licensed under the BSD 2-Clause License (the "License").  See License in the project root for license information.
+ * Copyright 2017 LinkedIn Corp. Licensed under the BSD 2-Clause License (the "License"). See License in the project root for license information.
  */
 
 package com.linkedin.kafka.cruisecontrol.model;
 
+import com.linkedin.cruisecontrol.monitor.sampling.aggregator.AggregatedMetricValues;
 import com.linkedin.kafka.cruisecontrol.common.Resource;
-import com.linkedin.kafka.cruisecontrol.exception.ModelInputException;
-import com.linkedin.kafka.cruisecontrol.monitor.sampling.Snapshot;
+import com.linkedin.kafka.cruisecontrol.config.BrokerCapacityInfo;
 import java.io.IOException;
 import java.io.OutputStream;
 import java.io.Serializable;
 import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
 import java.util.Collection;
 import java.util.HashMap;
 import java.util.HashSet;
+import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import org.apache.kafka.common.TopicPartition;
 
+import static com.linkedin.kafka.cruisecontrol.common.Resource.DISK;
 
 public class Host implements Serializable {
+  private static final double DEAD_HOST_CAPACITY = -1.0;
   private final Map<Integer, Broker> _brokers;
   private final Set<Replica> _replicas;
   private final Rack _rack;
@@ -33,8 +37,8 @@ public class Host implements Serializable {
     _brokers = new HashMap<>();
     _replicas = new HashSet<>();
     _rack = rack;
-    _load = Load.newLoad();
-    _hostCapacity = new double[Resource.values().length];
+    _load = new Load();
+    _hostCapacity = new double[Resource.cachedValues().size()];
     _aliveBrokers = 0;
   }
 
@@ -65,13 +69,13 @@ public class Host implements Serializable {
     int numTopicReplicas = 0;
 
     for (Broker broker : _brokers.values()) {
-      numTopicReplicas += broker.replicasOfTopicInBroker(topic).size();
+      numTopicReplicas += broker.numReplicasOfTopicInBroker(topic);
     }
     return numTopicReplicas;
   }
 
   /**
-   * @return all the topics that have at least one partition on the host.
+   * @return All the topics that have at least one partition on the host.
    */
   public Set<String> topics() {
     Set<String> topics = new HashSet<>();
@@ -84,10 +88,10 @@ public class Host implements Serializable {
    * brokers in the rack for the requested resource.
    *
    * @param resource Resource for which capacity will be provided.
-   * @return Healthy host capacity of the resource.
+   * @return Alive host capacity of the resource.
    */
   public double capacityFor(Resource resource) {
-    return _aliveBrokers > 0 ? _hostCapacity[resource.id()] : -1.0;
+    return _aliveBrokers > 0 ? _hostCapacity[resource.id()] : DEAD_HOST_CAPACITY;
   }
 
   /**
@@ -103,26 +107,49 @@ public class Host implements Serializable {
   }
 
   /**
-   * The load on the rack.
+   * @return The load on the rack.
    */
   public Load load() {
     return _load;
   }
 
   /**
-   * The name of the host
+   * Mark specified disk dead and update the capacity
+   *
+   * @param brokerId The id of broker which host the disk.
+   * @param logdir Log directory of the disk.
+   * @return The disk capacity lost.
+   */
+  double markDiskDead(int brokerId, String logdir) {
+    Broker broker = broker(brokerId);
+    double capacityLost = broker.markDiskDead(logdir);
+    _hostCapacity[DISK.id()] -= capacityLost;
+    return capacityLost;
+  }
+
+  /**
+   * @return The name of the host
    */
   public String name() {
     return _name;
   }
 
-  // Model manipulation.
-  Broker createBroker(Integer brokerId, Map<Resource, Double> brokerCapacity) {
-    Broker broker = new Broker(this, brokerId, brokerCapacity);
+  /**
+   * Create a broker under this host, and get the created broker.
+   *
+   * @param brokerId Id of the broker to be created.
+   * @param brokerCapacityInfo Capacity information of the created broker.
+   * @param populateReplicaPlacementInfo Whether populate replica placement over disk information or not.
+   * @return Created broker.
+   */
+  Broker createBroker(Integer brokerId, BrokerCapacityInfo brokerCapacityInfo, boolean populateReplicaPlacementInfo) {
+    Broker broker = new Broker(this, brokerId, brokerCapacityInfo, populateReplicaPlacementInfo);
     _brokers.put(brokerId, broker);
     _aliveBrokers++;
-    for (Map.Entry<Resource, Double> entry : brokerCapacity.entrySet()) {
-      _hostCapacity[entry.getKey().id()] += entry.getValue();
+    for (Map.Entry<Resource, Double> entry : brokerCapacityInfo.capacity().entrySet()) {
+      Resource resource = entry.getKey();
+      _hostCapacity[resource.id()] += (resource == Resource.CPU) ? (entry.getValue() * brokerCapacityInfo.numCpuCores())
+                                                                 : entry.getValue();
     }
     return broker;
   }
@@ -133,12 +160,12 @@ public class Host implements Serializable {
   void setBrokerState(int brokerId, Broker.State newState) {
     Broker broker = broker(brokerId);
     if (broker.isAlive() && newState == Broker.State.DEAD) {
-      for (Resource r : Resource.values()) {
+      for (Resource r : Resource.cachedValues()) {
         _hostCapacity[r.id()] -= broker.capacityFor(r);
       }
       _aliveBrokers--;
     } else if (!broker.isAlive() && newState != Broker.State.DEAD) {
-      for (Resource r : Resource.values()) {
+      for (Resource r : Resource.cachedValues()) {
         _hostCapacity[r.id()] += broker.capacityFor(r);
       }
       _aliveBrokers++;
@@ -155,7 +182,7 @@ public class Host implements Serializable {
   Replica removeReplica(int brokerId, TopicPartition tp) {
     Broker broker = _brokers.get(brokerId);
     if (broker == null) {
-      throw new IllegalStateException(String.format("Cannot remove replica for %s from broker broker %s because "
+      throw new IllegalStateException(String.format("Cannot remove replica for %s from broker %s because "
                                                         + "it does not exist in host %s", tp, brokerId, _name));
     }
     Replica replica = broker.removeReplica(tp);
@@ -164,36 +191,35 @@ public class Host implements Serializable {
     return replica;
   }
 
-  Map<Resource, Map<Long, Double>> makeFollower(int brokerId, TopicPartition tp) throws ModelInputException {
+  AggregatedMetricValues makeFollower(int brokerId, TopicPartition tp) {
     Broker broker = broker(brokerId);
     if (broker == null) {
       throw new IllegalStateException(String.format("Cannot make replica %s on broker %d as follower because the broker"
                                                         + " does not exist in host %s", tp, brokerId, _name));
     }
-    Map<Resource, Map<Long, Double>> leadershipLoad = broker.makeFollower(tp);
+    AggregatedMetricValues leadershipLoadDelta = broker.makeFollower(tp);
 
     // Remove leadership load from recent load.
-    _load.subtractLoadFor(Resource.NW_OUT, leadershipLoad.get(Resource.NW_OUT));
-    _load.subtractLoadFor(Resource.CPU, leadershipLoad.get(Resource.CPU));
-    return leadershipLoad;
+    _load.subtractLoad(leadershipLoadDelta);
+    return leadershipLoadDelta;
   }
 
   void makeLeader(int brokerId,
                   TopicPartition tp,
-                  Map<Resource, Map<Long, Double>> leadershipLoadBySnapshotTime) throws ModelInputException {
+                  AggregatedMetricValues leadershipLoadDelta) {
     Broker broker = _brokers.get(brokerId);
-    broker.makeLeader(tp, leadershipLoadBySnapshotTime);
+    broker.makeLeader(tp, leadershipLoadDelta);
     // Add leadership load to recent load.
-    _load.addLoadFor(Resource.NW_OUT, leadershipLoadBySnapshotTime.get(Resource.NW_OUT));
-    _load.addLoadFor(Resource.CPU, leadershipLoadBySnapshotTime.get(Resource.CPU));
+    _load.addLoad(leadershipLoadDelta);
   }
 
-  void pushLatestSnapshot(int brokerId,
-                          TopicPartition tp,
-                          Snapshot snapshot) throws ModelInputException {
+  void setReplicaLoad(int brokerId,
+                      TopicPartition tp,
+                      AggregatedMetricValues aggregatedMetricValues,
+                      List<Long> windows) {
     Broker broker = _brokers.get(brokerId);
-    broker.pushLatestSnapshot(tp, snapshot);
-    _load.addSnapshot(snapshot);
+    broker.setReplicaLoad(tp, aggregatedMetricValues, windows);
+    _load.addMetricValues(aggregatedMetricValues, windows);
   }
 
   void clearLoad() {
@@ -201,6 +227,25 @@ public class Host implements Serializable {
     _load.clearLoad();
   }
 
+  /**
+   * @return An object that can be further used to encode into JSON.
+   */
+  public Map<String, Object> getJsonStructure() {
+    Map<String, Object> hostMap = new HashMap<>();
+    List<Map<String, Object>> brokerList = new ArrayList<>();
+    for (Broker broker : _brokers.values()) {
+      brokerList.add(broker.getJsonStructure());
+    }
+    hostMap.put(ModelUtils.NAME, _name);
+    hostMap.put(ModelUtils.BROKERS, brokerList);
+    return hostMap;
+  }
+
+  /**
+   * Write to the given output stream.
+   *
+   * @param out Output stream.
+   */
   public void writeTo(OutputStream out) throws IOException {
     String host = String.format("<Host name=\"%s\">%n", _name);
     out.write(host.getBytes(StandardCharsets.UTF_8));

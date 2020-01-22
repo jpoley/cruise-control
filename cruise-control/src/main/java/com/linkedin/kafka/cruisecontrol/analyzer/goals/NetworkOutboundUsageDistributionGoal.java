@@ -1,12 +1,12 @@
 /*
- * Copyright 2017 LinkedIn Corp. Licensed under the BSD 2-Clause License (the "License").  See License in the project root for license information.
+ * Copyright 2017 LinkedIn Corp. Licensed under the BSD 2-Clause License (the "License"). See License in the project root for license information.
  *
  */
 
 package com.linkedin.kafka.cruisecontrol.analyzer.goals;
 
-import com.linkedin.kafka.cruisecontrol.analyzer.BalancingConstraint;
 import com.linkedin.kafka.cruisecontrol.common.Resource;
+import com.linkedin.kafka.cruisecontrol.analyzer.BalancingConstraint;
 
 
 public class NetworkOutboundUsageDistributionGoal extends ResourceDistributionGoal {

@@ -1,9 +1,10 @@
 /*
- * Copyright 2017 LinkedIn Corp. Licensed under the BSD 2-Clause License (the "License").  See License in the project root for license information.
+ * Copyright 2017 LinkedIn Corp. Licensed under the BSD 2-Clause License (the "License"). See License in the project root for license information.
  */
 
 package com.linkedin.kafka.cruisecontrol.monitor.sampling;
 
+import com.linkedin.kafka.cruisecontrol.KafkaCruiseControlUtils;
 import java.util.ArrayList;
 import java.util.Map;
 import java.util.concurrent.Executors;
@@ -20,21 +21,18 @@ public class ReadOnlyKafkaSampleStore extends KafkaSampleStore {
    */
   @Override
   public void configure(Map<String, ?> config) {
-    _partitionMetricSampleStoreTopic = (String) config.get(PARTITION_METRIC_SAMPLE_STORE_TOPIC_CONFIG);
-    _brokerMetricSampleStoreTopic = (String) config.get(BROKER_METRIC_SAMPLE_STORE_TOPIC_CONFIG);
-    if (_partitionMetricSampleStoreTopic == null
-        || _brokerMetricSampleStoreTopic == null
-        || _partitionMetricSampleStoreTopic.isEmpty()
-        || _brokerMetricSampleStoreTopic.isEmpty()) {
-      throw new IllegalArgumentException("The sample store topic names must be configured.");
-    }
-    String numProcessingThreadsString = (String) config.get(NUM_SAMPLE_LOADING_THREADS);
-    int numProcessingThreads = numProcessingThreadsString == null || numProcessingThreadsString.isEmpty() ?
-        5 : Integer.parseInt(numProcessingThreadsString);
+    _partitionMetricSampleStoreTopic = KafkaCruiseControlUtils.getRequiredConfig(config, PARTITION_METRIC_SAMPLE_STORE_TOPIC_CONFIG);
+    _brokerMetricSampleStoreTopic = KafkaCruiseControlUtils.getRequiredConfig(config, BROKER_METRIC_SAMPLE_STORE_TOPIC_CONFIG);
+    String metricSampleStoreTopicReplicationFactorString = (String) config.get(SAMPLE_STORE_TOPIC_REPLICATION_FACTOR_CONFIG);
+    _sampleStoreTopicReplicationFactor = metricSampleStoreTopicReplicationFactorString == null || metricSampleStoreTopicReplicationFactorString.isEmpty()
+        ? null : Integer.parseInt(metricSampleStoreTopicReplicationFactorString);
+    String numProcessingThreadsString = (String) config.get(NUM_SAMPLE_LOADING_THREADS_CONFIG);
+    int numProcessingThreads = numProcessingThreadsString == null || numProcessingThreadsString.isEmpty()
+        ? DEFAULT_NUM_SAMPLE_LOADING_THREADS : Integer.parseInt(numProcessingThreadsString);
     _metricProcessorExecutor = Executors.newFixedThreadPool(numProcessingThreads);
     _consumers = new ArrayList<>(numProcessingThreads);
     for (int i = 0; i < numProcessingThreads; i++) {
-      _consumers.add(createConsumers(config));
+      _consumers.add(createConsumer(config));
     }
     _loadingProgress = -1.0;
   }

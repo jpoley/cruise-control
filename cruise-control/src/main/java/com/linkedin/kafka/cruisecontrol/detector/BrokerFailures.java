@@ -1,53 +1,97 @@
 /*
- * Copyright 2017 LinkedIn Corp. Licensed under the BSD 2-Clause License (the "License").  See License in the project root for license information.
+ * Copyright 2017 LinkedIn Corp. Licensed under the BSD 2-Clause License (the "License"). See License in the project root for license information.
  */
 
 package com.linkedin.kafka.cruisecontrol.detector;
 
+import com.linkedin.cruisecontrol.detector.AnomalyType;
 import com.linkedin.kafka.cruisecontrol.KafkaCruiseControl;
+import com.linkedin.kafka.cruisecontrol.config.KafkaCruiseControlConfig;
 import com.linkedin.kafka.cruisecontrol.exception.KafkaCruiseControlException;
-import java.text.DateFormat;
-import java.text.SimpleDateFormat;
-import java.util.Collections;
-import java.util.Date;
+import com.linkedin.kafka.cruisecontrol.servlet.handler.async.runnable.RemoveBrokersRunnable;
+import com.linkedin.kafka.cruisecontrol.servlet.response.OptimizationResult;
 import java.util.Map;
+
+import static com.linkedin.kafka.cruisecontrol.KafkaCruiseControlUtils.toDateString;
+import static com.linkedin.kafka.cruisecontrol.config.constants.AnomalyDetectorConfig.ANOMALY_DETECTION_ALLOW_CAPACITY_ESTIMATION_CONFIG;
+import static com.linkedin.kafka.cruisecontrol.config.constants.AnomalyDetectorConfig.SELF_HEALING_EXCLUDE_RECENTLY_DEMOTED_BROKERS_CONFIG;
+import static com.linkedin.kafka.cruisecontrol.config.constants.AnomalyDetectorConfig.SELF_HEALING_EXCLUDE_RECENTLY_REMOVED_BROKERS_CONFIG;
+import static com.linkedin.kafka.cruisecontrol.detector.AnomalyDetectorUtils.getSelfHealingGoalNames;
+import static com.linkedin.kafka.cruisecontrol.detector.AnomalyUtils.extractKafkaCruiseControlObjectFromConfig;
+import static com.linkedin.kafka.cruisecontrol.detector.notifier.KafkaAnomalyType.BROKER_FAILURE;
 
 
 /**
  * The broker failures that have been detected.
  */
-public class BrokerFailures extends Anomaly {
-  private final Map<Integer, Long> _failedBrokers;
+public class BrokerFailures extends KafkaAnomaly {
+  protected Map<Integer, Long> _failedBrokers;
+  protected RemoveBrokersRunnable _removeBrokersRunnable;
 
-  public BrokerFailures(Map<Integer, Long> failedBrokers) {
-    _failedBrokers = failedBrokers;
+  /**
+   * An anomaly to indicate broker failure(s).
+   */
+  public BrokerFailures() {
+    _detectionTimeMs = 0;
   }
 
   /**
-   * Get the failed broker list and their failure time in millisecond.
+   * @return The failed broker list and their failure time in millisecond.
    */
   public Map<Integer, Long> failedBrokers() {
     return _failedBrokers;
   }
 
   @Override
-  void fix(KafkaCruiseControl kafkaCruiseControl) throws KafkaCruiseControlException {
-    // Fix the cluster by removing the failed brokers.
-    if (_failedBrokers != null && !_failedBrokers.isEmpty()) {
-      kafkaCruiseControl.decommissionBrokers(_failedBrokers.keySet(), false, false,
-                                             Collections.emptyList());
+  public boolean fix() throws KafkaCruiseControlException {
+    boolean hasProposalsToFix = false;
+    // Fix the cluster by removing the failed brokers (mode: non-Kafka_assigner).
+    if (_removeBrokersRunnable != null) {
+      _optimizationResult = new OptimizationResult(_removeBrokersRunnable.removeBrokers(), null);
+      hasProposalsToFix = hasProposalsToFix();
+      // Ensure that only the relevant response is cached to avoid memory pressure.
+      _optimizationResult.discardIrrelevantAndCacheJsonAndPlaintext();
     }
+    return hasProposalsToFix;
+  }
+
+  @Override
+  public AnomalyType anomalyType() {
+    return BROKER_FAILURE;
   }
 
   @Override
   public String toString() {
     StringBuilder sb = new StringBuilder().append("{\n");
     _failedBrokers.forEach((key, value) -> {
-      Date date = new Date(value);
-      DateFormat format = new SimpleDateFormat("dd/MM/yyyy HH:mm:ss");
-      sb.append("\tBroker ").append(key).append(" failed at ").append(format.format(date)).append("\n");
+      sb.append("\tBroker ").append(key).append(" failed at ").append(toDateString(value)).append("\n");
     });
     sb.append("}");
     return sb.toString();
   }
+
+  @SuppressWarnings("unchecked")
+  @Override
+  public void configure(Map<String, ?> configs) {
+    super.configure(configs);
+    KafkaCruiseControl kafkaCruiseControl = extractKafkaCruiseControlObjectFromConfig(configs, BROKER_FAILURE);
+    _failedBrokers = (Map<Integer, Long>) configs.get(BrokerFailureDetector.FAILED_BROKERS_OBJECT_CONFIG);
+    if (_failedBrokers != null && _failedBrokers.isEmpty()) {
+      throw new IllegalArgumentException("Missing broker ids for failed brokers anomaly.");
+    }
+    _optimizationResult = null;
+    KafkaCruiseControlConfig config = kafkaCruiseControl.config();
+    boolean allowCapacityEstimation = config.getBoolean(ANOMALY_DETECTION_ALLOW_CAPACITY_ESTIMATION_CONFIG);
+    boolean excludeRecentlyDemotedBrokers = config.getBoolean(SELF_HEALING_EXCLUDE_RECENTLY_DEMOTED_BROKERS_CONFIG);
+    boolean excludeRecentlyRemovedBrokers = config.getBoolean(SELF_HEALING_EXCLUDE_RECENTLY_REMOVED_BROKERS_CONFIG);
+    _removeBrokersRunnable = _failedBrokers != null ? new RemoveBrokersRunnable(kafkaCruiseControl,
+                                                                                _failedBrokers.keySet(),
+                                                                                getSelfHealingGoalNames(config),
+                                                                                allowCapacityEstimation,
+                                                                                excludeRecentlyDemotedBrokers,
+                                                                                excludeRecentlyRemovedBrokers,
+                                                                                _anomalyId.toString(),
+                                                                                String.format("Self healing for %s: %s", BROKER_FAILURE, this))
+                                                    : null;
+    }
 }

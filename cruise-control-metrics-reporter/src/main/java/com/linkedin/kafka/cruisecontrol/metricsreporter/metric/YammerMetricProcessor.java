@@ -1,5 +1,5 @@
 /*
- * Copyright 2017 LinkedIn Corp. Licensed under the BSD 2-Clause License (the "License").  See License in the project root for license information.
+ * Copyright 2017 LinkedIn Corp. Licensed under the BSD 2-Clause License (the "License"). See License in the project root for license information.
  */
 
 package com.linkedin.kafka.cruisecontrol.metricsreporter.metric;
@@ -12,20 +12,22 @@ import com.yammer.metrics.core.Metered;
 import com.yammer.metrics.core.MetricName;
 import com.yammer.metrics.core.MetricProcessor;
 import com.yammer.metrics.core.Timer;
+import com.yammer.metrics.stats.Snapshot;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 
 /**
- * A Yammer metric processor that process the yammer metrics. Currenlty all the interested metrics are of type
+ * A Yammer metric processor that process the yammer metrics. Currently all the interested metrics are of type
  * Meter (BytesInRate, BytesOutRate) or Gauge (Partition Size).
  */
 public class YammerMetricProcessor implements MetricProcessor<YammerMetricProcessor.Context> {
   private static final Logger LOG = LoggerFactory.getLogger(YammerMetricProcessor.class);
 
   @Override
-  public void processMeter(MetricName metricName, Metered metered, Context context) throws Exception {
+  public void processMeter(MetricName metricName, Metered metered, Context context) {
     if (MetricsUtils.isInterested(metricName)) {
+      LOG.trace("Processing metric {} of type Meter.", metricName);
       double value;
       if (context.reportingInterval() <= 60000L) {
         value = metered.oneMinuteRate();
@@ -43,30 +45,99 @@ public class YammerMetricProcessor implements MetricProcessor<YammerMetricProces
   }
 
   @Override
-  public void processCounter(MetricName metricName, Counter counter, Context context) throws Exception {
+  public void processCounter(MetricName metricName, Counter counter, Context context) {
     if (MetricsUtils.isInterested(metricName)) {
       LOG.warn("Not processing metric {} of type Counter.", metricName);
     }
   }
 
   @Override
-  public void processHistogram(MetricName metricName, Histogram histogram, Context context)
-      throws Exception {
+  public void processHistogram(MetricName metricName, Histogram histogram, Context context) {
     if (MetricsUtils.isInterested(metricName)) {
-      LOG.warn("Not processing metric {} of type Histogram.", metricName);
+      LOG.trace("Processing metric {} of type Histogram.", metricName);
+      // Get max metric value
+      CruiseControlMetric ccm = MetricsUtils.toCruiseControlMetric(context.time(),
+                                                                   context.brokerId(),
+                                                                   metricName,
+                                                                   histogram.max(),
+                                                                   MetricsUtils.ATTRIBUTE_MAX);
+      context.reporter().sendCruiseControlMetric(ccm);
+
+      // Get mean metric value
+      ccm = MetricsUtils.toCruiseControlMetric(context.time(),
+                                               context.brokerId(),
+                                               metricName,
+                                               histogram.mean(),
+                                               MetricsUtils.ATTRIBUTE_MEAN);
+      context.reporter().sendCruiseControlMetric(ccm);
+
+      Snapshot snapshot = histogram.getSnapshot();
+      // Get 50th percentile (i.e. median) metric value
+      ccm = MetricsUtils.toCruiseControlMetric(context.time(),
+                                               context.brokerId(),
+                                               metricName,
+                                               snapshot.getMedian(),
+                                               MetricsUtils.ATTRIBUTE_50TH_PERCENTILE);
+      context.reporter().sendCruiseControlMetric(ccm);
+
+      // Get 999th percentile metric value
+      ccm = MetricsUtils.toCruiseControlMetric(context.time(),
+                                               context.brokerId(),
+                                               metricName,
+                                               snapshot.get999thPercentile(),
+                                               MetricsUtils.ATTRIBUTE_999TH_PERCENTILE);
+      context.reporter().sendCruiseControlMetric(ccm);
     }
   }
 
   @Override
-  public void processTimer(MetricName metricName, Timer timer, Context context) throws Exception {
+  public void processTimer(MetricName metricName, Timer timer, Context context) {
     if (MetricsUtils.isInterested(metricName)) {
-      LOG.warn("Not processing metric {} of type Timer.", metricName);
+      LOG.trace("Processing metric {} of type Timer.", metricName);
+
+      CruiseControlMetric ccm = MetricsUtils.toCruiseControlMetric(context.time(),
+                                                                   context.brokerId(),
+                                                                   metricName,
+                                                                   timer.fiveMinuteRate());
+      context.reporter().sendCruiseControlMetric(ccm);
+      // Get max metric value
+      ccm = MetricsUtils.toCruiseControlMetric(context.time(),
+                                               context.brokerId(),
+                                               metricName,
+                                               timer.max(),
+                                               MetricsUtils.ATTRIBUTE_MAX);
+      context.reporter().sendCruiseControlMetric(ccm);
+      // Get mean metric value
+      ccm = MetricsUtils.toCruiseControlMetric(context.time(),
+                                               context.brokerId(),
+                                               metricName,
+                                               timer.mean(),
+                                               MetricsUtils.ATTRIBUTE_MEAN);
+      context.reporter().sendCruiseControlMetric(ccm);
+
+      Snapshot snapshot = timer.getSnapshot();
+      // Get 50th percentile (i.e. median) metric value
+      ccm = MetricsUtils.toCruiseControlMetric(context.time(),
+                                               context.brokerId(),
+                                               metricName,
+                                               snapshot.getMedian(),
+                                               MetricsUtils.ATTRIBUTE_50TH_PERCENTILE);
+      context.reporter().sendCruiseControlMetric(ccm);
+
+      // Get 999th percentile metric value
+      ccm = MetricsUtils.toCruiseControlMetric(context.time(),
+                                               context.brokerId(),
+                                               metricName,
+                                               snapshot.get999thPercentile(),
+                                               MetricsUtils.ATTRIBUTE_999TH_PERCENTILE);
+      context.reporter().sendCruiseControlMetric(ccm);
     }
   }
 
   @Override
-  public void processGauge(MetricName metricName, Gauge<?> gauge, Context context) throws Exception {
+  public void processGauge(MetricName metricName, Gauge<?> gauge, Context context) {
     if (MetricsUtils.isInterested(metricName)) {
+      LOG.trace("Processing metric {} of type Gauge.", metricName);
       if (!(gauge.value() instanceof Number)) {
         throw new IllegalStateException(String.format("The value of yammer metric %s is %s, which is not a number",
                                                       metricName, gauge.value()));

@@ -1,11 +1,12 @@
 /*
- * Copyright 2017 LinkedIn Corp. Licensed under the BSD 2-Clause License (the "License").  See License in the project root for license information.
+ * Copyright 2017 LinkedIn Corp. Licensed under the BSD 2-Clause License (the "License"). See License in the project root for license information.
  */
 
 package com.linkedin.kafka.cruisecontrol.model;
 
 import com.linkedin.kafka.cruisecontrol.config.KafkaCruiseControlConfig;
-import com.linkedin.kafka.cruisecontrol.monitor.sampling.BrokerMetricSample;
+import com.linkedin.kafka.cruisecontrol.config.constants.MonitorConfig;
+import com.linkedin.kafka.cruisecontrol.monitor.sampling.holder.BrokerMetricSample;
 import java.util.Collection;
 import org.apache.kafka.common.record.CompressionType;
 
@@ -18,27 +19,32 @@ public class ModelParameters {
   /**
    * The contribution weight of leader bytes in on the CPU utilization of a broker.
    */
-  static double CPU_WEIGHT_OF_LEADER_BYTES_IN_RATE = 0.6;
+  static double CPU_WEIGHT_OF_LEADER_BYTES_IN_RATE = 0.7;
   /**
    * The contribution weight of leader bytes out on the CPU utilization of a broker.
    */
-  static double CPU_WEIGHT_OF_LEADER_BYTES_OUT_RATE = 0.1;
+  static double CPU_WEIGHT_OF_LEADER_BYTES_OUT_RATE = 0.15;
   /**
    * The contribution weight of follower bytes in on the CPU utilization of a broker.
    */
-  static double CPU_WEIGHT_OF_FOLLOWER_BYTES_IN_RATE = 0.3;
+  static double CPU_WEIGHT_OF_FOLLOWER_BYTES_IN_RATE = 0.15;
 
   private ModelParameters() {
 
   }
 
+  /**
+   * Initialize the model parameters.
+   *
+   * @param config The configurations for Cruise Control.
+   */
   public static void init(KafkaCruiseControlConfig config) {
     CPU_WEIGHT_OF_LEADER_BYTES_IN_RATE =
-        config.getDouble(KafkaCruiseControlConfig.LEADER_NETWORK_INBOUND_WEIGHT_FOR_CPU_UTIL_CONFIG);
+        config.getDouble(MonitorConfig.LEADER_NETWORK_INBOUND_WEIGHT_FOR_CPU_UTIL_CONFIG);
     CPU_WEIGHT_OF_LEADER_BYTES_OUT_RATE =
-        config.getDouble(KafkaCruiseControlConfig.LEADER_NETWORK_OUTBOUND_WEIGHT_FOR_CPU_UTIL_CONFIG);
+        config.getDouble(MonitorConfig.LEADER_NETWORK_OUTBOUND_WEIGHT_FOR_CPU_UTIL_CONFIG);
     CPU_WEIGHT_OF_FOLLOWER_BYTES_IN_RATE =
-        config.getDouble(KafkaCruiseControlConfig.FOLLOWER_NETWORK_INBOUND_WEIGHT_FOR_CPU_UTIL_CONFIG);
+        config.getDouble(MonitorConfig.FOLLOWER_NETWORK_INBOUND_WEIGHT_FOR_CPU_UTIL_CONFIG);
     LINEAR_REGRESSION_PARAMETERS.init(config);
   }
 
@@ -56,7 +62,7 @@ public class ModelParameters {
 
   /**
    * Trigger the calculation of the model parameters.
-   * @return true if the parameters are generated, otherwise false;
+   * @return True if the parameters are generated, otherwise false;
    */
   public static boolean updateModelCoefficient() {
     return LINEAR_REGRESSION_PARAMETERS.updateModelCoefficient();

@@ -1,10 +1,9 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!--
-  ~ Copyright 2017 LinkedIn Corp. Licensed under the BSD 2-Clause License (the "License").  See License in the project root for license information.
+  ~ Copyright 2017 LinkedIn Corp. Licensed under the BSD 2-Clause License (the "License"). See License in the project root for license information.
   -->
 
-<!DOCTYPE module PUBLIC "-//Puppy Crawl//DTD Check Configuration 1.3//EN" "http://www.puppycrawl.com/dtds/configuration_1_3.dtd">
-
+<!DOCTYPE module PUBLIC "-//Checkstyle//DTD Checkstyle Configuration 1.3//EN" "https://checkstyle.org/dtds/configuration_1_3.dtd">
 <!--
     Checkstyle-Configuration: LinkedIn Style
     Description:
@@ -17,7 +16,7 @@ LinkedIn Java style.
 
     <!-- header -->
     <module name="RegexpHeader">
-        <property name="header" value="/\*\n Copyright 2017 LinkedIn Corp.*"/>
+        <property name="header" value="/\*\n Copyright [0-9]* LinkedIn Corp.*"/>
     </module>
 
     <property name="severity" value="${checkstyle.severity}" default="error"/>
@@ -111,6 +110,15 @@ LinkedIn Java style.
             <property name="checkFirstSentence" value="false"/>
         </module>
 
+        <module name="JavadocMethod">
+            <property name="scope" value="public"/>
+            <property name="allowMissingParamTags" value="true"/>
+            <property name="allowMissingThrowsTags" value="true"/>
+            <property name="allowMissingPropertyJavadoc" value="true"/>
+            <property name="minLineCount" value="1"/>
+            <property name="tokens" value="METHOD_DEF,ANNOTATION_FIELD_DEF"/>
+            <property name="ignoreMethodNamesRegex" value="^test.*$"/>
+        </module>
         <!-- NAMING CONVENTIONS -->
 
         <!-- Generic parameters for a class must be uppercase letters (e.g. <T>, <OLD>) -->
@@ -124,6 +132,9 @@ LinkedIn Java style.
         <!-- Local variables must be camel case starting with lowercase letter -->
         <module name="LocalFinalVariableName"/>
         <module name="LocalVariableName"/>
+        <module name="MemberName">
+            <property name="format" value="^_[a-z][a-zA-Z0-9]*$"/>
+        </module>
         <!-- Method name must be camel case starting with a lowercase letter -->
         <module name="MethodName"/>
         <!-- Generic parameters for a method must be uppercase letters (e.g. <V>, <NEW>) -->

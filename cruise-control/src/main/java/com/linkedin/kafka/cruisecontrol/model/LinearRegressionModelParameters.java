@@ -1,11 +1,12 @@
 /*
- * Copyright 2017 LinkedIn Corp. Licensed under the BSD 2-Clause License (the "License").  See License in the project root for license information.
+ * Copyright 2017 LinkedIn Corp. Licensed under the BSD 2-Clause License (the "License"). See License in the project root for license information.
  */
 
 package com.linkedin.kafka.cruisecontrol.model;
 
 import com.linkedin.kafka.cruisecontrol.config.KafkaCruiseControlConfig;
-import com.linkedin.kafka.cruisecontrol.monitor.sampling.BrokerMetricSample;
+import com.linkedin.kafka.cruisecontrol.config.constants.MonitorConfig;
+import com.linkedin.kafka.cruisecontrol.monitor.sampling.holder.BrokerMetricSample;
 import java.util.Collection;
 import java.util.HashMap;
 import java.util.HashSet;
@@ -19,6 +20,8 @@ import java.util.concurrent.atomic.AtomicInteger;
 import org.apache.commons.math3.stat.regression.OLSMultipleLinearRegression;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+
+import static com.linkedin.kafka.cruisecontrol.monitor.metricdefinition.KafkaMetricDef.*;
 
 
 public class LinearRegressionModelParameters {
@@ -39,17 +42,17 @@ public class LinearRegressionModelParameters {
 
   static void init(KafkaCruiseControlConfig config) {
     MIN_CPU_UTIL_OBSERVATION_BUCKETS =
-        config.getInt(KafkaCruiseControlConfig.LINEAR_REGRESSION_MODEL_MIN_NUM_CPU_UTIL_BUCKETS_CONFIG);
+        config.getInt(MonitorConfig.LINEAR_REGRESSION_MODEL_MIN_NUM_CPU_UTIL_BUCKETS_CONFIG);
     CPU_UTIL_BUCKET_SIZE =
-        config.getInt(KafkaCruiseControlConfig.LINEAR_REGRESSION_MODEL_CPU_UTIL_BUCKET_SIZE_CONFIG);
+        config.getInt(MonitorConfig.LINEAR_REGRESSION_MODEL_CPU_UTIL_BUCKET_SIZE_CONFIG);
     NUM_OBSERVATIONS_PER_UTIL_BUCKET =
-        config.getInt(KafkaCruiseControlConfig.LINEAR_REGRESSION_MODEL_REQUIRED_SAMPLES_PER_CPU_UTIL_BUCKET_CONFIG);
+        config.getInt(MonitorConfig.LINEAR_REGRESSION_MODEL_REQUIRED_SAMPLES_PER_CPU_UTIL_BUCKET_CONFIG);
     int numBuckets = 99 / CPU_UTIL_BUCKET_SIZE + 1;
     if (MIN_CPU_UTIL_OBSERVATION_BUCKETS > (numBuckets)) {
       throw new IllegalArgumentException("There are only " + numBuckets + " CPU utilization buckets with "
-          + CPU_UTIL_BUCKET_SIZE + "%% bucket size. But "
-          + KafkaCruiseControlConfig.LINEAR_REGRESSION_MODEL_MIN_NUM_CPU_UTIL_BUCKETS_CONFIG + " is "
-          + MIN_CPU_UTIL_OBSERVATION_BUCKETS
+                                         + CPU_UTIL_BUCKET_SIZE + "%% bucket size. But "
+                                         + MonitorConfig.LINEAR_REGRESSION_MODEL_MIN_NUM_CPU_UTIL_BUCKETS_CONFIG + " is "
+                                         + MIN_CPU_UTIL_OBSERVATION_BUCKETS
       );
     }
   }
@@ -64,7 +67,7 @@ public class LinearRegressionModelParameters {
 
   /**
    * Trigger the calculation of the model parameters.
-   * @return true if the parameters are generated, otherwise false;
+   * @return True if the parameters are generated, otherwise false;
    */
   public synchronized boolean updateModelCoefficient() {
     if (validBuckets().size() < MIN_CPU_UTIL_OBSERVATION_BUCKETS) {
@@ -97,10 +100,15 @@ public class LinearRegressionModelParameters {
     return false;
   }
 
+  /**
+   * Add metric observation with the given training data.
+   *
+   * @param trainingData Training data.
+   */
   public synchronized void addMetricObservation(Collection<BrokerMetricSample> trainingData) {
     if (trainingData != null) {
       for (BrokerMetricSample data : trainingData) {
-        int utilBucket = (int) (data.brokerCpuUtil() / CPU_UTIL_BUCKET_SIZE);
+        int utilBucket = (int) (data.metricValue(CPU_USAGE) / CPU_UTIL_BUCKET_SIZE);
         int index =
             INDICES.computeIfAbsent(utilBucket, k -> new AtomicInteger(0)).getAndIncrement() % NUM_OBSERVATIONS_PER_UTIL_BUCKET;
         double[][] byteRateObservations =
@@ -108,32 +116,39 @@ public class LinearRegressionModelParameters {
         double[] cpuUtilObservation =
             CPU_UTIL_OBSERVATIONS.computeIfAbsent(utilBucket, k -> new double[NUM_OBSERVATIONS_PER_UTIL_BUCKET]);
         byteRateObservations[index] =
-            new double[]{data.brokerLeaderBytesInRate(), data.brokerLeaderBytesOutRate(), data.brokerReplicationBytesInRate()};
-        cpuUtilObservation[index] = data.brokerCpuUtil();
-        int leaderToFollowerRatio = data.brokerReplicationBytesInRate() == 0.0 ? 10000000 :
-            (int) ((data.brokerLeaderBytesInRate() / data.brokerReplicationBytesInRate()) * 10);
-        int leaderBytesInToBytesOutRatio = data.brokerLeaderBytesOutRate() == 0.0 ? 10000000 :
-            (int) ((data.brokerLeaderBytesInRate() / data.brokerLeaderBytesOutRate()) * 10);
-        int count = OBSERVED_LEADER_TO_FOLLOWER_BYTES_RATIO.getOrDefault(leaderToFollowerRatio, 0);
-        OBSERVED_LEADER_TO_FOLLOWER_BYTES_RATIO.put(leaderToFollowerRatio, count + 1);
+            new double[]{data.metricValue(LEADER_BYTES_IN), data.metricValue(LEADER_BYTES_OUT), data.metricValue(REPLICATION_BYTES_IN_RATE)};
+        cpuUtilObservation[index] = data.metricValue(CPU_USAGE);
+        int leaderToFollowerBytesInRatio = data.metricValue(REPLICATION_BYTES_IN_RATE) == 0.0 ? 10000000 :
+            (int) ((data.metricValue(LEADER_BYTES_IN) / data.metricValue(REPLICATION_BYTES_IN_RATE)) * 10);
+        int leaderBytesInToBytesOutRatio = data.metricValue(LEADER_BYTES_OUT) == 0.0 ? 10000000 :
+            (int) ((data.metricValue(LEADER_BYTES_IN) / data.metricValue(LEADER_BYTES_OUT)) * 10);
+        int count = OBSERVED_LEADER_TO_FOLLOWER_BYTES_RATIO.getOrDefault(leaderToFollowerBytesInRatio, 0);
+        OBSERVED_LEADER_TO_FOLLOWER_BYTES_RATIO.put(leaderToFollowerBytesInRatio, count + 1);
         count = OBSERVED_LEADER_BYTES_IN_TO_BYTES_OUT_RATIO.getOrDefault(leaderBytesInToBytesOutRatio, 0);
         OBSERVED_LEADER_BYTES_IN_TO_BYTES_OUT_RATIO.put(leaderBytesInToBytesOutRatio, count + 1);
         if (!_coefficients.isEmpty()) {
-          Double estimatedCpu = data.brokerLeaderBytesInRate() * _coefficients.get(ModelCoefficient.LEADER_BYTES_IN)
-              + data.brokerLeaderBytesOutRate() * _coefficients.getOrDefault(ModelCoefficient.LEADER_BYTES_OUT, 0.0)
-              + data.brokerReplicationBytesInRate() * _coefficients.get(ModelCoefficient.FOLLOWER_BYTES_IN);
-          int error = estimatedCpu.intValue() - (int) data.brokerCpuUtil();
+          Double estimatedCpu = data.metricValue(LEADER_BYTES_IN) * _coefficients.get(ModelCoefficient.LEADER_BYTES_IN)
+              + data.metricValue(LEADER_BYTES_OUT) * _coefficients.getOrDefault(ModelCoefficient.LEADER_BYTES_OUT, 0.0)
+              + data.metricValue(REPLICATION_BYTES_IN_RATE) * _coefficients.get(ModelCoefficient.FOLLOWER_BYTES_IN);
+          int error = estimatedCpu.intValue() - data.metricValue(CPU_USAGE).intValue();
           count = CPU_UTIL_ESTIMATION_ERROR_STATS.getOrDefault(error, 0);
           CPU_UTIL_ESTIMATION_ERROR_STATS.put(error, count + 1);
-          LOG.debug("CPU util estimation: actual: {}, estimated: {}, error: {}",
-                    data.brokerCpuUtil(), estimatedCpu, estimatedCpu - data.brokerCpuUtil());
+          if (LOG.isDebugEnabled()) {
+            LOG.debug("CPU util estimation: actual: {}, estimated: {}, error: {}",
+                      data.metricValue(CPU_USAGE), estimatedCpu, estimatedCpu - data.metricValue(CPU_USAGE));
+          }
         }
       }
     }
   }
 
+  /**
+   * @return Model coefficient training completeness.
+   */
   public double modelCoefficientTrainingCompleteness() {
-    LOG.debug("Linear regression model training data indices: {}", INDICES);
+    if (LOG.isDebugEnabled()) {
+      LOG.debug("Linear regression model training data indices: {}", INDICES);
+    }
     PriorityQueue<Integer> mostFilledBuckets =
         new PriorityQueue<>(MIN_CPU_UTIL_OBSERVATION_BUCKETS);
     for (AtomicInteger index : INDICES.values()) {
@@ -151,6 +166,9 @@ public class LinearRegressionModelParameters {
     return completeness;
   }
 
+  /**
+   * @return Linear regression model state.
+   */
   public synchronized LinearRegressionModelState modelState() {
     Map<Integer, Double> detailCompleteness = new HashMap<>();
     for (Map.Entry<Integer, AtomicInteger> entry : INDICES.entrySet()) {

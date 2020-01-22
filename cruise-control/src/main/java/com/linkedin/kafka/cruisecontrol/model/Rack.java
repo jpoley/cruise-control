@@ -1,13 +1,13 @@
 /*
- * Copyright 2017 LinkedIn Corp. Licensed under the BSD 2-Clause License (the "License").  See License in the project root for license information.
+ * Copyright 2017 LinkedIn Corp. Licensed under the BSD 2-Clause License (the "License"). See License in the project root for license information.
  */
 
 package com.linkedin.kafka.cruisecontrol.model;
 
+import com.linkedin.cruisecontrol.monitor.sampling.aggregator.AggregatedMetricValues;
 import com.linkedin.kafka.cruisecontrol.common.Resource;
-import com.linkedin.kafka.cruisecontrol.exception.ModelInputException;
 
-import com.linkedin.kafka.cruisecontrol.monitor.sampling.Snapshot;
+import com.linkedin.kafka.cruisecontrol.config.BrokerCapacityInfo;
 import java.io.IOException;
 import java.io.OutputStream;
 import java.io.Serializable;
@@ -22,6 +22,7 @@ import java.util.Set;
 
 import org.apache.kafka.common.TopicPartition;
 
+import static com.linkedin.kafka.cruisecontrol.common.Resource.DISK;
 
 /**
  * A class that holds the information of the rack, including its topology, liveness and load for brokers, and
@@ -45,33 +46,33 @@ public class Rack implements Serializable {
     _hosts = new HashMap<>();
     _brokers = new HashMap<>();
     // Initially rack does not contain any load -- cannot create a load with a specific window size.
-    _load = Load.newLoad();
-    _rackCapacity = new double[Resource.values().length];
+    _load = new Load();
+    _rackCapacity = new double[Resource.cachedValues().size()];
   }
 
   /**
-   * Get the rack load information.
+   * @return The rack load information.
    */
   public Load load() {
     return _load;
   }
 
   /**
-   * Get the rack Id.
+   * @return The rack Id.
    */
   public String id() {
     return _id;
   }
 
   /**
-   * Get the collection of brokers in the current rack.
+   * @return The collection of brokers in the current rack.
    */
   public Collection<Broker> brokers() {
     return _brokers.values();
   }
 
   /**
-   * Return the hosts in this rack.
+   * @return The hosts in this rack.
    */
   public Collection<Host> hosts() {
     return _hosts.values();
@@ -88,7 +89,7 @@ public class Rack implements Serializable {
   }
 
   /**
-   * Get the list of replicas in the rack.
+   * @return The list of replicas in the rack.
    */
   public List<Replica> replicas() {
     List<Replica> replicas = new ArrayList<>();
@@ -115,7 +116,7 @@ public class Rack implements Serializable {
   }
 
   /**
-   * Get a set of topic names in the cluster.
+   * @return A set of topic names in the cluster.
    */
   public Set<String> topics() {
     Set<String> topics = new HashSet<>();
@@ -131,7 +132,7 @@ public class Rack implements Serializable {
    * brokers in the rack for the requested resource.
    *
    * @param resource Resource for which capacity will be provided.
-   * @return Healthy rack capacity of the resource.
+   * @return Alive rack capacity of the resource.
    */
   public double capacityFor(Resource resource) {
     return _rackCapacity[resource.id()];
@@ -155,15 +156,15 @@ public class Rack implements Serializable {
    * Get the removed replica from the rack.
    *
    * @param brokerId       Id of the broker containing the
-   * @param topicPartition Topic partition of the replica to be removed.
+   * @param tp Topic partition of the replica to be removed.
    * @return The requested replica if the id exists in the rack and the partition is found in the broker, and
    * null otherwise.
    */
-  Replica removeReplica(int brokerId, TopicPartition topicPartition) {
+  Replica removeReplica(int brokerId, TopicPartition tp) {
     Broker broker = _brokers.get(brokerId);
     if (broker != null) {
       // Remove the replica and the associated load from the broker that it resides in.
-      Replica removedReplica = broker.host().removeReplica(brokerId, topicPartition);
+      Replica removedReplica = broker.host().removeReplica(brokerId, tp);
       // Remove the load of the removed replica from the recent load of the rack.
       _load.subtractLoad(removedReplica.load());
       // Return the removed replica.
@@ -185,40 +186,37 @@ public class Rack implements Serializable {
   }
 
   /**
-   * (1) Make the replica with the given topicPartition and brokerId a follower.
+   * (1) Make the replica with the given topic partition and brokerId a follower.
    * (2) Remove and get the outbound network load associated with leadership from the given replica.
    *
    * @param brokerId       Id of the broker containing the replica.
-   * @param topicPartition TopicPartition of the replica for which the outbound network load will be removed.
+   * @param tp TopicPartition of the replica for which the outbound network load will be removed.
    * @return Leadership load by snapshot time.
    */
-  Map<Resource, Map<Long, Double>> makeFollower(int brokerId,
-                                                TopicPartition topicPartition) throws ModelInputException {
+  AggregatedMetricValues makeFollower(int brokerId, TopicPartition tp) {
     Host host = _brokers.get(brokerId).host();
-    Map<Resource, Map<Long, Double>> leadershipLoad = host.makeFollower(brokerId, topicPartition);
+    AggregatedMetricValues leadershipLoadDelta = host.makeFollower(brokerId, tp);
     // Remove leadership load from recent load.
-    _load.subtractLoadFor(Resource.NW_OUT, leadershipLoad.get(Resource.NW_OUT));
-    _load.subtractLoadFor(Resource.CPU, leadershipLoad.get(Resource.CPU));
-    return leadershipLoad;
+    _load.subtractLoad(leadershipLoadDelta);
+    return leadershipLoadDelta;
   }
 
   /**
-   * (1) Make the replica with the given topicPartition and brokerId the leader.
+   * (1) Make the replica with the given topic partition and brokerId the leader.
    * (2) Add the outbound network load associated with leadership to the given replica.
+   * (3) Add the CPU load associated with leadership.
    *
-   * @param brokerId                     Id of the broker containing the replica.
-   * @param topicPartition               TopicPartition of the replica for which the outbound network load will be added.
-   * @param leadershipLoadBySnapshotTime Leadership load to be added by snapshot time.
+   * @param brokerId Id of the broker containing the replica.
+   * @param tp TopicPartition of the replica for which the outbound network load will be added.
+   * @param leadershipLoadDelta Resource to leadership load to be added by windows.
    */
   void makeLeader(int brokerId,
-                  TopicPartition topicPartition,
-                  Map<Resource, Map<Long, Double>> leadershipLoadBySnapshotTime)
-      throws ModelInputException {
+                  TopicPartition tp,
+                  AggregatedMetricValues leadershipLoadDelta) {
     Host host = _brokers.get(brokerId).host();
-    host.makeLeader(brokerId, topicPartition, leadershipLoadBySnapshotTime);
+    host.makeLeader(brokerId, tp, leadershipLoadDelta);
     // Add leadership load to recent load.
-    _load.addLoadFor(Resource.NW_OUT, leadershipLoadBySnapshotTime.get(Resource.NW_OUT));
-    _load.addLoadFor(Resource.CPU, leadershipLoadBySnapshotTime.get(Resource.CPU));
+    _load.addLoad(leadershipLoadDelta);
   }
 
   /**
@@ -232,34 +230,39 @@ public class Rack implements Serializable {
   }
 
   /**
-   * Pushes the latest snapshot information containing the snapshot time and resource loads to the rack.
+   * Set the replica load.
    *
    * @param brokerId       Broker Id containing the replica with the given topic partition.
-   * @param topicPartition Topic partition that identifies the replica in this broker.
-   * @param snapshot       Snapshot containing latest state for each resource.
+   * @param tp Topic partition that identifies the replica in this broker.
+   * @param aggregatedMetricValues   The metric values for this replica..
    */
-  void pushLatestSnapshot(int brokerId, TopicPartition topicPartition, Snapshot snapshot)
-      throws ModelInputException {
+  void setReplicaLoad(int brokerId, TopicPartition tp, AggregatedMetricValues aggregatedMetricValues, List<Long> windows) {
     Host host = _brokers.get(brokerId).host();
-    host.pushLatestSnapshot(brokerId, topicPartition, snapshot);
+    host.setReplicaLoad(brokerId, tp, aggregatedMetricValues, windows);
     // Update the recent load of this rack.
-    _load.addSnapshot(snapshot);
+    _load.addMetricValues(aggregatedMetricValues, windows);
   }
 
   /**
    * Create a broker under this rack, and get the created broker.
    *
-   * @param brokerId       Id of the broker to be created.
-   * @param hostName           The hostName of the broker
-   * @param brokerCapacity Capacity of the created broker.
+   * @param brokerId Id of the broker to be created.
+   * @param hostName The hostName of the broker
+   * @param brokerCapacityInfo Capacity information of the created broker.
+   * @param populateReplicaPlacementInfo Whether populate replica placement over disk information or not.
    * @return Created broker.
    */
-  Broker createBroker(int brokerId, String hostName, Map<Resource, Double> brokerCapacity) {
+  Broker createBroker(int brokerId,
+                      String hostName,
+                      BrokerCapacityInfo brokerCapacityInfo,
+                      boolean populateReplicaPlacementInfo) {
     Host host = _hosts.computeIfAbsent(hostName, name -> new Host(name, this));
-    Broker broker = host.createBroker(brokerId, brokerCapacity);
+    Broker broker = host.createBroker(brokerId, brokerCapacityInfo, populateReplicaPlacementInfo);
     _brokers.put(brokerId, broker);
-    for (Map.Entry<Resource, Double> entry : brokerCapacity.entrySet()) {
-      _rackCapacity[entry.getKey().id()] += entry.getValue();
+    for (Map.Entry<Resource, Double> entry : brokerCapacityInfo.capacity().entrySet()) {
+      Resource resource = entry.getKey();
+      _rackCapacity[resource.id()] += (resource == Resource.CPU) ? (entry.getValue() * brokerCapacityInfo.numCpuCores())
+                                                                 : entry.getValue();
     }
     return broker;
   }
@@ -270,18 +273,42 @@ public class Rack implements Serializable {
   void setBrokerState(int brokerId, Broker.State newState) {
     // Broker is dead
     Broker broker = broker(brokerId);
-    if (broker.isAlive() && newState == Broker.State.DEAD) {
-      for (Resource r : Resource.values()) {
-        _rackCapacity[r.id()] -= broker.capacityFor(r);
+    broker.host().setBrokerState(brokerId, newState);
+    for (Resource r : Resource.cachedValues()) {
+      double capacity = 0;
+      for (Host h : _hosts.values()) {
+        if (h.isAlive()) {
+          capacity += h.capacityFor(r);
+        }
       }
-      broker.host().setBrokerState(brokerId, newState);
-    } else if (!broker.isAlive() && newState != Broker.State.DEAD) {
-      broker.host().setBrokerState(brokerId, newState);
-      for (Resource r : Resource.values()) {
-        _rackCapacity[r.id()] += broker.capacityFor(r);
-      }
+      _rackCapacity[r.id()] = capacity;
     }
+  }
 
+  /**
+   * Mark specified disk dead and update the capacity.
+   *
+   * @param brokerId The id of broker which host the disk.
+   * @param logdir Log directory of the disk.
+   */
+  void markDiskDead(int brokerId, String logdir) {
+    Broker broker = broker(brokerId);
+    double capacityLost = broker.host().markDiskDead(brokerId, logdir);
+    _rackCapacity[DISK.id()] -= capacityLost;
+  }
+
+  /**
+   * @return An object that can be further used to encode into JSON.
+   */
+  public Map<String, Object> getJsonStructure() {
+    List<Object> hostList = new ArrayList<>();
+    for (Host host : _hosts.values()) {
+      hostList.add(host.getJsonStructure());
+    }
+    Map<String, Object> rackMap = new HashMap<>();
+    rackMap.put(ModelUtils.RACK_ID, _id);
+    rackMap.put(ModelUtils.HOSTS, hostList);
+    return rackMap;
   }
 
   /**
@@ -298,18 +325,8 @@ public class Rack implements Serializable {
   }
 
   /**
-   * Get string representation of Rack in XML format.
+   * Get string representation of {@link Rack}.
    */
-  public String toXml() {
-    StringBuilder rack = new StringBuilder().append(String.format("<Rack id=\"%s\">%n", _id));
-
-    for (Host host : _hosts.values()) {
-      rack.append(host.toString());
-    }
-
-    return rack + "</Rack>%n";
-  }
-
   @Override
   public String toString() {
     return "Rack{" + "_id=\"" + _id + "\", _hosts=" + _hosts.size() + ", _brokers=" + _brokers.size() + ", _load=" + _load + '}';

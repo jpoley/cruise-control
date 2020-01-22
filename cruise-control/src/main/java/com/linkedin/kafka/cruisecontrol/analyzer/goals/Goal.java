@@ -1,11 +1,14 @@
 /*
- * Copyright 2017 LinkedIn Corp. Licensed under the BSD 2-Clause License (the "License").  See License in the project root for license information.
+ * Copyright 2017 LinkedIn Corp. Licensed under the BSD 2-Clause License (the "License"). See License in the project root for license information.
  *
  */
 
 package com.linkedin.kafka.cruisecontrol.analyzer.goals;
 
-import com.linkedin.kafka.cruisecontrol.analyzer.BalancingProposal;
+import com.linkedin.cruisecontrol.common.CruiseControlConfigurable;
+import com.linkedin.kafka.cruisecontrol.analyzer.OptimizationOptions;
+import com.linkedin.kafka.cruisecontrol.analyzer.ActionAcceptance;
+import com.linkedin.kafka.cruisecontrol.analyzer.BalancingAction;
 import com.linkedin.kafka.cruisecontrol.exception.KafkaCruiseControlException;
 import com.linkedin.kafka.cruisecontrol.exception.OptimizationFailureException;
 import com.linkedin.kafka.cruisecontrol.model.ClusterModel;
@@ -15,7 +18,6 @@ import com.linkedin.kafka.cruisecontrol.monitor.ModelCompletenessRequirements;
 import java.io.Serializable;
 import java.util.Comparator;
 import java.util.Set;
-import org.apache.kafka.common.Configurable;
 import org.apache.kafka.common.annotation.InterfaceStability;
 
 
@@ -33,8 +35,7 @@ import org.apache.kafka.common.annotation.InterfaceStability;
  * </p>
  */
 @InterfaceStability.Evolving
-public interface Goal extends Configurable {
-
+public interface Goal extends CruiseControlConfigurable {
   /**
    * Optimize the given cluster model as needed for this goal.
    * <p>
@@ -44,7 +45,7 @@ public interface Goal extends Configurable {
    * <p>
    *   During the optimization, the implementation should make sure that all the previously optimized goals
    *   are still satisfied after this method completes its execution. The implementation can use
-   *   {@link #isProposalAcceptable(BalancingProposal, ClusterModel)} to check whether an admin operation
+   *   {@link #actionAcceptance(BalancingAction, ClusterModel)} to check whether an admin operation
    *   is allowed by a previously optimized goal.
    * </p>
    * <p>
@@ -58,23 +59,25 @@ public interface Goal extends Configurable {
    * @param clusterModel   The cluster model reflecting the current state of the cluster. It is a result of the
    *                       optimization of the previously optimized goals.
    * @param optimizedGoals Goals that have already been optimized. These goals cannot be violated.
-   * @param excludedTopics The topics that should be excluded from the optimization proposal.
-   * @return true if the goal is met after the optimization, false otherwise. Note that for hard goals,
+   * @param optimizationOptions Options to take into account during optimization.
+   * @return True if the goal is met after the optimization, false otherwise. Note that for hard goals,
    * the implementation should just throw exceptions if the goal is not met.
    * @throws KafkaCruiseControlException
    */
-  boolean optimize(ClusterModel clusterModel, Set<Goal> optimizedGoals, Set<String> excludedTopics)
+  boolean optimize(ClusterModel clusterModel, Set<Goal> optimizedGoals, OptimizationOptions optimizationOptions)
       throws KafkaCruiseControlException;
 
   /**
-   * Check whether given proposal is acceptable by this goal in the given state of the cluster. A proposal is
-   * acceptable by a goal if it satisfies requirements of the goal.
+   * Check whether the given action is acceptable by this goal in the given state of the cluster. An action is
+   * (1) accepted by a goal if it satisfies requirements of the goal, or (2) rejected by a goal if it violates its
+   * requirements. The return value indicates whether the action is accepted or why it is rejected.
+   * It is assumed that the given action does not involve replicas regarding excluded topics.
    *
-   * @param proposal     Proposal to be checked for acceptance.
-   * @param clusterModel State of the cluster before application of the proposal.
-   * @return True if proposal is acceptable by this goal, false otherwise.
+   * @param action Action to be checked for acceptance.
+   * @param clusterModel State of the cluster before application of the action.
+   * @return The action acceptance indicating whether an action is accepted, or why it is rejected.
    */
-  boolean isProposalAcceptable(BalancingProposal proposal, ClusterModel clusterModel);
+  ActionAcceptance actionAcceptance(BalancingAction action, ClusterModel clusterModel);
 
   /**
    * Get an instance of {@link ClusterModelStatsComparator} for this goal.
@@ -85,6 +88,7 @@ public interface Goal extends Configurable {
    * Cruise Control will not reuse the returned instance.
    *
    * The returned value must not be null.
+   * @return An instance of {@link ClusterModelStatsComparator} for this goal.
    */
   ClusterModelStatsComparator clusterModelStatsComparator();
 
@@ -98,14 +102,25 @@ public interface Goal extends Configurable {
    *
    * The returned value must not be null.
    *
-   * @return the load requirement for this goal.
+   * @return The load requirement for this goal.
    */
   ModelCompletenessRequirements clusterModelCompletenessRequirements();
 
   /**
-   * Get the name of this goal. Name of a goal provides an identification for the goal in human readable format.
+   * @return The name of this goal. Name of a goal provides an identification for the goal in human readable format.
    */
   String name();
+
+  /**
+   * Signal for finishing the process for rebalance or self-healing for this goal. It is intended to mark the goal
+   * optimization as finished and perform the memory clean up after the goal optimization.
+   */
+  void finish();
+
+  /**
+   * @return True if this is a hard goal, false otherwise.
+   */
+  boolean isHardGoal();
 
   /**
    * A comparator that compares two cluster model stats.

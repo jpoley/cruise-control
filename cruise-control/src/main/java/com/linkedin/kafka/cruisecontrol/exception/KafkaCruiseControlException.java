@@ -1,11 +1,11 @@
 /*
- * Copyright 2017 LinkedIn Corp. Licensed under the BSD 2-Clause License (the "License").  See License in the project root for license information.
+ * Copyright 2017 LinkedIn Corp. Licensed under the BSD 2-Clause License (the "License"). See License in the project root for license information.
  */
 
 package com.linkedin.kafka.cruisecontrol.exception;
 
 /**
- * The parent exception for all the cruise control exceptions.
+ * The parent exception for all the Cruise Control exceptions.
  */
 public class KafkaCruiseControlException extends Exception {
 

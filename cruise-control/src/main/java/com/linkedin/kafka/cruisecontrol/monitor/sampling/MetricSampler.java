@@ -1,25 +1,29 @@
 /*
- * Copyright 2017 LinkedIn Corp. Licensed under the BSD 2-Clause License (the "License").  See License in the project root for license information.
+ * Copyright 2017 LinkedIn Corp. Licensed under the BSD 2-Clause License (the "License"). See License in the project root for license information.
  */
 
 package com.linkedin.kafka.cruisecontrol.monitor.sampling;
 
+import com.linkedin.cruisecontrol.common.CruiseControlConfigurable;
+import com.linkedin.cruisecontrol.metricdef.MetricDef;
 import com.linkedin.kafka.cruisecontrol.exception.MetricSamplingException;
+import com.linkedin.kafka.cruisecontrol.monitor.sampling.holder.BrokerMetricSample;
+import com.linkedin.kafka.cruisecontrol.monitor.sampling.holder.PartitionMetricSample;
 import java.util.Collections;
 import java.util.Set;
 import org.apache.kafka.common.Cluster;
-import org.apache.kafka.common.Configurable;
 import org.apache.kafka.common.TopicPartition;
 
 /**
  * The interface to get metric samples of given topic partitions.
  * <p>
- * Kafka cruise control periodically collects the metrics of all the partitions in the cluster, including the leader and follower
- * replicas. The {@link #getSamples(Cluster, Set, long, long, SamplingMode)}
+ * Kafka Cruise Control periodically collects the metrics of all the partitions in the cluster, including the leader and follower
+ * replicas. The {@link #getSamples(Cluster, Set, long, long, SamplingMode, MetricDef, long)}
  * will be called for all the replicas of partitions in the cluster in one sampling period.
  * The MetricSampler may be used by multiple threads at the same time, so the implementation need to be thread safe.
+ *
  */
-public interface MetricSampler extends Configurable, AutoCloseable {
+public interface MetricSampler extends CruiseControlConfigurable, AutoCloseable {
   Samples EMPTY_SAMPLES = new Samples(Collections.emptySet(), Collections.emptySet());
 
   /**
@@ -44,13 +48,17 @@ public interface MetricSampler extends Configurable, AutoCloseable {
    * @param startTimeMs the start time of the sampling period.
    * @param endTimeMs the end time of the sampling period.
    * @param mode The sampling mode.
-   * @return the PartitionMetricSample of the topic partition and replica id
+   * @param metricDef the metric definitions.
+   * @param timeout The sampling timeout to stop sampling even if there is more data to get.
+   * @return The PartitionMetricSample of the topic partition and replica id
    */
   Samples getSamples(Cluster cluster,
                      Set<TopicPartition> assignedPartitions,
                      long startTimeMs,
                      long endTimeMs,
-                     SamplingMode mode)
+                     SamplingMode mode,
+                     MetricDef metricDef,
+                     long timeout)
       throws MetricSamplingException;
 
   /**

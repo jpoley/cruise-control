@@ -1,11 +1,11 @@
 /*
- * Copyright 2017 LinkedIn Corp. Licensed under the BSD 2-Clause License (the "License").  See License in the project root for license information.
+ * Copyright 2017 LinkedIn Corp. Licensed under the BSD 2-Clause License (the "License"). See License in the project root for license information.
  */
 
 package com.linkedin.kafka.cruisecontrol.monitor.sampling;
 
+import com.linkedin.cruisecontrol.common.CruiseControlConfigurable;
 import org.apache.kafka.common.Cluster;
-import org.apache.kafka.common.Configurable;
 import org.apache.kafka.common.TopicPartition;
 
 import java.util.List;
@@ -14,9 +14,10 @@ import java.util.Set;
 /**
  * The interface to assign the partitions to the metric samplers.
  */
-public interface MetricSamplerPartitionAssignor extends Configurable {
+public interface MetricSamplerPartitionAssignor extends CruiseControlConfigurable {
 
   /**
+   * @deprecated Please use {@link #assignPartitions(Cluster)}.
    * Assign the partitions in the cluster to the metric fetchers.
    *
    * @param cluster        The Kafka cluster.
@@ -25,4 +26,11 @@ public interface MetricSamplerPartitionAssignor extends Configurable {
    */
   List<Set<TopicPartition>> assignPartitions(Cluster cluster, int numFetchers);
 
+  /**
+   * Assign the partitions in the cluster to the single metric fetcher.
+   *
+   * @param cluster The Kafka cluster
+   * @return Set of topic partitions assigned to the fetcher.
+   */
+  Set<TopicPartition> assignPartitions(Cluster cluster);
 }

@@ -1,65 +1,103 @@
 /*
- * Copyright 2017 LinkedIn Corp. Licensed under the BSD 2-Clause License (the "License").  See License in the project root for license information.
+ * Copyright 2017 LinkedIn Corp. Licensed under the BSD 2-Clause License (the "License"). See License in the project root for license information.
  *
  */
 
 package com.linkedin.kafka.cruisecontrol.analyzer.goals;
 
+import com.linkedin.kafka.cruisecontrol.analyzer.OptimizationOptions;
+import com.linkedin.kafka.cruisecontrol.analyzer.ActionAcceptance;
+import com.linkedin.kafka.cruisecontrol.analyzer.ActionType;
 import com.linkedin.kafka.cruisecontrol.analyzer.AnalyzerUtils;
 import com.linkedin.kafka.cruisecontrol.analyzer.BalancingConstraint;
-import com.linkedin.kafka.cruisecontrol.analyzer.BalancingProposal;
+import com.linkedin.kafka.cruisecontrol.analyzer.BalancingAction;
 import com.linkedin.kafka.cruisecontrol.common.Statistic;
-import com.linkedin.kafka.cruisecontrol.exception.AnalysisInputException;
-import com.linkedin.kafka.cruisecontrol.exception.ModelInputException;
 import com.linkedin.kafka.cruisecontrol.model.Broker;
 import com.linkedin.kafka.cruisecontrol.model.ClusterModel;
 import com.linkedin.kafka.cruisecontrol.model.ClusterModelStats;
 import com.linkedin.kafka.cruisecontrol.model.Replica;
-
-import com.linkedin.kafka.cruisecontrol.monitor.ModelCompletenessRequirements;
-import java.util.Collection;
-import java.util.HashSet;
+import com.linkedin.kafka.cruisecontrol.model.ReplicaSortFunctionFactory;
+import com.linkedin.kafka.cruisecontrol.model.SortedReplicasHelper;
+import java.util.Collections;
+import java.util.Comparator;
 import java.util.List;
-import java.util.Map;
+import java.util.PriorityQueue;
 import java.util.Set;
+import java.util.SortedSet;
+import java.util.TreeSet;
 import java.util.stream.Collectors;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
-import org.apache.kafka.common.TopicPartition;
+import static com.linkedin.kafka.cruisecontrol.analyzer.ActionAcceptance.ACCEPT;
+import static com.linkedin.kafka.cruisecontrol.analyzer.ActionAcceptance.REPLICA_REJECT;
+import static com.linkedin.kafka.cruisecontrol.analyzer.goals.GoalUtils.replicaSortName;
+import static com.linkedin.kafka.cruisecontrol.analyzer.goals.ReplicaDistributionAbstractGoal.ChangeType.*;
+import static com.linkedin.kafka.cruisecontrol.common.Resource.DISK;
 
 
 /**
- * Class for achieving the following soft goal:
- * <p>
- * SOFT GOAL#4: Distribute partitions (independent of their topics) evenly over brokers.
+ * Soft goal to generate replica movement proposals to ensure that the number of replicas on each broker is
+ * <ul>
+ * <li>Under: (the average number of replicas per broker) * (1 + replica count balance percentage)</li>
+ * <li>Above: (the average number of replicas per broker) * Math.max(0, 1 - replica count balance percentage)</li>
+ * </ul>
  */
-public class ReplicaDistributionGoal extends AbstractGoal {
-  private ReplicaDistributionTarget _replicaDistributionTarget;
+public class ReplicaDistributionGoal extends ReplicaDistributionAbstractGoal {
+  private static final Logger LOG = LoggerFactory.getLogger(ReplicaDistributionGoal.class);
 
   /**
-   * Constructor for Replica Distribution Goal. Initially replica distribution target is null.
+   * Constructor for Replica Distribution Goal.
    */
   public ReplicaDistributionGoal() {
-
   }
 
   public ReplicaDistributionGoal(BalancingConstraint balancingConstraint) {
+    this();
     _balancingConstraint = balancingConstraint;
   }
 
+  @Override
+  int numInterestedReplicas(ClusterModel clusterModel) {
+    return clusterModel.numReplicas();
+  }
+
   /**
-   * Check whether given proposal is acceptable by this goal. A proposal is acceptable if the number of replicas at
-   * the source broker are more than the number of replicas at the destination (remote) broker.
-   *
-   * @param proposal     Proposal to be checked for acceptance.
-   * @param clusterModel The state of the cluster.
-   * @return True if proposal is acceptable by this goal, false otherwise.
+   * The rebalance threshold for this goal is set by
+   * {@link com.linkedin.kafka.cruisecontrol.config.KafkaCruiseControlConfig#REPLICA_COUNT_BALANCE_THRESHOLD_CONFIG}
    */
   @Override
-  public boolean isProposalAcceptable(BalancingProposal proposal, ClusterModel clusterModel) {
-    int numLocalReplicas = clusterModel.broker(proposal.sourceBrokerId()).replicas().size();
-    int numRemoteReplicas = clusterModel.broker(proposal.destinationBrokerId()).replicas().size();
+  double balancePercentage() {
+    return _balancingConstraint.replicaBalancePercentage();
+  }
 
-    return numRemoteReplicas < numLocalReplicas;
+  /**
+   * Check whether the given action is acceptable by this goal. An action is acceptable if the number of replicas at
+   * (1) the source broker does not go under the allowed limit.
+   * (2) the destination broker does not go over the allowed limit.
+   *
+   * @param action Action to be checked for acceptance.
+   * @param clusterModel The state of the cluster.
+   * @return {@link ActionAcceptance#ACCEPT} if the action is acceptable by this goal,
+   * {@link ActionAcceptance#REPLICA_REJECT} otherwise.
+   */
+  @Override
+  public ActionAcceptance actionAcceptance(BalancingAction action, ClusterModel clusterModel) {
+    switch (action.balancingAction()) {
+      case INTER_BROKER_REPLICA_SWAP:
+      case LEADERSHIP_MOVEMENT:
+        return ACCEPT;
+      case INTER_BROKER_REPLICA_MOVEMENT:
+        Broker sourceBroker = clusterModel.broker(action.sourceBrokerId());
+        Broker destinationBroker = clusterModel.broker(action.destinationBrokerId());
+
+        //Check that destination and source would not become unbalanced.
+        return (isReplicaCountUnderBalanceUpperLimitAfterChange(destinationBroker, destinationBroker.replicas().size(), ADD)
+               && isReplicaCountAboveBalanceLowerLimitAfterChange(sourceBroker, sourceBroker.replicas().size(), REMOVE))
+               ? ACCEPT : REPLICA_REJECT;
+      default:
+        throw new IllegalArgumentException("Unsupported balancing action " + action.balancingAction() + " is provided.");
+    }
   }
 
   @Override
@@ -68,104 +106,32 @@ public class ReplicaDistributionGoal extends AbstractGoal {
   }
 
   @Override
-  public ModelCompletenessRequirements clusterModelCompletenessRequirements() {
-    return new ModelCompletenessRequirements(1, 0.0, true);
-  }
-
-  /**
-   * Get the name of this goal. Name of a goal provides an identification for the goal in human readable format.
-   */
-  @Override
   public String name() {
     return ReplicaDistributionGoal.class.getSimpleName();
-  }
-
-  /**
-   * Heal the given cluster without violating the requirements of optimized goals.
-   *
-   * @param clusterModel   The state of the cluster.
-   * @param optimizedGoals Optimized goals.
-   */
-  protected void healCluster(ClusterModel clusterModel, Set<Goal> optimizedGoals)
-      throws AnalysisInputException, ModelInputException {
-    // Move self healed replicas (if their broker is overloaded or they reside at dead brokers) to eligible ones.
-    for (Replica replica : clusterModel.selfHealingEligibleReplicas()) {
-      _replicaDistributionTarget.moveSelfHealingEligibleReplicaToEligibleBroker(clusterModel, replica,
-          replica.broker().replicas().size(), optimizedGoals);
-    }
-  }
-
-  /**
-   * Get brokers that the rebalance process will go over to apply balancing actions to replicas they contain.
-   *
-   * @param clusterModel The state of the cluster.
-   * @return A collection of brokers that the rebalance process will go over to apply balancing actions to replicas
-   * they contain.
-   */
-  @Override
-  protected Collection<Broker> brokersToBalance(ClusterModel clusterModel) {
-    // Brokers having over minimum number of replicas per broker are eligible for balancing.
-    Set<Broker> brokersToBalance = new HashSet<>();
-    int minNumReplicasPerBroker = _replicaDistributionTarget.minNumReplicasPerBroker();
-    brokersToBalance.addAll(clusterModel.brokers().stream()
-        .filter(broker -> broker.replicas().size() > minNumReplicasPerBroker)
-        .collect(Collectors.toList()));
-    return brokersToBalance;
-  }
-
-  /**
-   * Check if requirements of this goal are not violated if this proposal is applied to the given cluster state,
-   * false otherwise.
-   *
-   * @param clusterModel The state of the cluster.
-   * @param proposal     Proposal containing information about
-   * @return True if requirements of this goal are not violated if this proposal is applied to the given cluster state,
-   * false otherwise.
-   */
-  @Override
-  protected boolean selfSatisfied(ClusterModel clusterModel, BalancingProposal proposal) {
-    // This method is not used by this goal.
-    return false;
   }
 
   /**
    * Initiates replica distribution goal.
    *
    * @param clusterModel The state of the cluster.
+   * @param optimizationOptions Options to take into account during optimization.
    */
   @Override
-  protected void initGoalState(ClusterModel clusterModel)
-      throws AnalysisInputException, ModelInputException {
-    Set<Broker> brokers = clusterModel.healthyBrokers();
-    // Populate a map of replica distribution target in the cluster.
-    int numReplicasToBalance = 0;
-    Map<TopicPartition, List<Integer>> replicaDistribution = clusterModel.getReplicaDistribution();
-    for (List<Integer> replicaList : replicaDistribution.values()) {
-      numReplicasToBalance += replicaList.size();
+  protected void initGoalState(ClusterModel clusterModel, OptimizationOptions optimizationOptions) {
+    super.initGoalState(clusterModel, optimizationOptions);
+    //Sort replicas for each broker in the cluster.
+    for (Broker broker : clusterModel.brokers()) {
+      new SortedReplicasHelper().maybeAddSelectionFunc(ReplicaSortFunctionFactory.selectImmigrants(),
+                                                       optimizationOptions.onlyMoveImmigrantReplicas())
+                                .maybeAddSelectionFunc(ReplicaSortFunctionFactory.selectImmigrantOrOfflineReplicas(),
+                                                       !clusterModel.selfHealingEligibleReplicas().isEmpty() && broker.isAlive())
+                                .addSelectionFunc(ReplicaSortFunctionFactory.selectReplicasBasedOnExcludedTopics(optimizationOptions.excludedTopics()))
+                                .addPriorityFunc(ReplicaSortFunctionFactory.prioritizeOfflineReplicas())
+                                .maybeAddPriorityFunc(ReplicaSortFunctionFactory.prioritizeImmigrants(),
+                                                      !optimizationOptions.onlyMoveImmigrantReplicas())
+                                .setScoreFunc(ReplicaSortFunctionFactory.sortByMetricGroupValue(DISK.name()))
+                                .trackSortedReplicasFor(replicaSortName(this, false, false), broker);
     }
-
-    _replicaDistributionTarget = new ReplicaDistributionTarget(numReplicasToBalance, brokers);
-    for (Broker broker : brokers) {
-      _replicaDistributionTarget.setBrokerEligibilityForReceivingReplica(broker.id(), broker.replicas().size());
-    }
-  }
-
-  /**
-   * Finish healing / rebalance of this goal.
-   *
-   * @param clusterModel The state of the cluster.
-   */
-  @Override
-  protected void updateGoalState(ClusterModel clusterModel)
-      throws AnalysisInputException {
-    // Sanity check: No self-healing eligible replica should remain at a decommissioned broker.
-    for (Replica replica : clusterModel.selfHealingEligibleReplicas()) {
-      if (!replica.broker().isAlive()) {
-        throw new AnalysisInputException(
-            "Self healing failed to move the replica away from decommissioned broker.");
-      }
-    }
-    finish();
   }
 
   /**
@@ -174,21 +140,149 @@ public class ReplicaDistributionGoal extends AbstractGoal {
    * @param broker         Broker to be balanced.
    * @param clusterModel   The state of the cluster.
    * @param optimizedGoals Optimized goals.
-   * @param excludedTopics The topics that should be excluded from the optimization proposal.
+   * @param optimizationOptions Options to take into account during optimization.
    */
   @Override
   protected void rebalanceForBroker(Broker broker,
                                     ClusterModel clusterModel,
                                     Set<Goal> optimizedGoals,
-                                    Set<String> excludedTopics)
-      throws AnalysisInputException, ModelInputException {
-    if (!clusterModel.selfHealingEligibleReplicas().isEmpty() && !broker.isAlive() && !broker.replicas().isEmpty()) {
-      healCluster(clusterModel, optimizedGoals);
-    } else {
-      // If broker is overloaded, move local replicas to eligible brokers.
-      _replicaDistributionTarget.moveReplicasInSourceBrokerToEligibleBrokers(clusterModel, new HashSet<>(broker.replicas()),
-                                                                             optimizedGoals, excludedTopics);
+                                    OptimizationOptions optimizationOptions) {
+    LOG.debug("Rebalancing broker {} [limits] lower: {} upper: {}.", broker.id(), _balanceLowerLimit, _balanceUpperLimit);
+    int numReplicas = broker.replicas().size();
+    int numOfflineReplicas = broker.currentOfflineReplicas().size();
+
+    // A broker with a bad disk may take new replicas and give away offline replicas.
+    boolean requireLessReplicas = numOfflineReplicas > 0 || (numReplicas > _balanceUpperLimit);
+    boolean requireMoreReplicas = broker.isAlive() && numReplicas - numOfflineReplicas < _balanceLowerLimit;
+    if (broker.isAlive() && !requireMoreReplicas && !requireLessReplicas) {
+      // return if the broker is already within the limit.
+      return;
+    } else if (!clusterModel.newBrokers().isEmpty() && !broker.isNew() && !requireLessReplicas) {
+      // return if we have new brokers and the current broker is not a new broker and does not require less replicas
+      // -- i.e. hence, does not have offline replicas on it.
+      return;
+    } else if (((!clusterModel.selfHealingEligibleReplicas().isEmpty() && broker.currentOfflineReplicas().isEmpty())
+               || optimizationOptions.onlyMoveImmigrantReplicas())
+               && requireLessReplicas && broker.immigrantReplicas().isEmpty()) {
+      // return if (1) cluster is in self-healing mode or (2) optimization option requires only moving immigrant replicas,
+      // and the broker requires less load but does not have any immigrant replicas.
+      return;
     }
+
+    // Update broker ids over the balance limit for logging purposes.
+    if (requireLessReplicas && rebalanceByMovingReplicasOut(broker, clusterModel, optimizedGoals, optimizationOptions)) {
+      _brokerIdsAboveBalanceUpperLimit.add(broker.id());
+      LOG.debug("Failed to sufficiently decrease replica count in broker {} with replica movements. Replicas: {}.",
+                broker.id(), broker.replicas().size());
+    }
+    if (requireMoreReplicas && rebalanceByMovingReplicasIn(broker, clusterModel, optimizedGoals, optimizationOptions)) {
+      _brokerIdsUnderBalanceLowerLimit.add(broker.id());
+      LOG.debug("Failed to sufficiently increase replica count in broker {} with replica movements. Replicas: {}.",
+                broker.id(), broker.replicas().size());
+    }
+    if (!_brokerIdsAboveBalanceUpperLimit.contains(broker.id()) && !_brokerIdsUnderBalanceLowerLimit.contains(broker.id())) {
+      LOG.debug("Successfully balanced replica count for broker {} by moving replicas. Replicas: {}",
+                broker.id(), broker.replicas().size());
+    }
+  }
+
+  private boolean rebalanceByMovingReplicasOut(Broker broker,
+                                               ClusterModel clusterModel,
+                                               Set<Goal> optimizedGoals,
+                                               OptimizationOptions optimizationOptions) {
+    // Get the eligible brokers.
+    SortedSet<Broker> candidateBrokers = new TreeSet<>(Comparator.comparingInt((Broker b) -> b.replicas().size()).thenComparingInt(Broker::id));
+
+    candidateBrokers.addAll(_fixOfflineReplicasOnly ? clusterModel.aliveBrokers() : clusterModel
+        .aliveBrokers()
+        .stream()
+        .filter(b -> b.replicas().size() < _balanceUpperLimit)
+        .collect(Collectors.toSet()));
+
+    // Now let's move things around.
+    boolean wasUnableToMoveOfflineReplica = false;
+    for (Replica replica : broker.trackedSortedReplicas(replicaSortName(this, false, false)).sortedReplicas(true)) {
+      if (wasUnableToMoveOfflineReplica && !replica.isCurrentOffline() && broker.replicas().size() <= _balanceUpperLimit) {
+        // Was unable to move offline replicas from the broker, and remaining replica count is under the balance limit.
+        return false;
+      }
+
+      Broker b = maybeApplyBalancingAction(clusterModel, replica, candidateBrokers, ActionType.INTER_BROKER_REPLICA_MOVEMENT,
+                                           optimizedGoals, optimizationOptions);
+      // Only check if we successfully moved something.
+      if (b != null) {
+        if (broker.replicas().size() <= (broker.currentOfflineReplicas().isEmpty() ? _balanceUpperLimit : 0)) {
+          return false;
+        }
+        // Remove and reinsert the broker so the order is correct.
+        candidateBrokers.remove(b);
+        if (b.replicas().size() < _balanceUpperLimit || _fixOfflineReplicasOnly) {
+          candidateBrokers.add(b);
+        }
+      } else if (replica.isCurrentOffline()) {
+        wasUnableToMoveOfflineReplica = true;
+      }
+    }
+    // All the replicas has been moved away from the broker.
+    return !broker.replicas().isEmpty();
+  }
+
+  private boolean rebalanceByMovingReplicasIn(Broker aliveDestBroker,
+                                              ClusterModel clusterModel,
+                                              Set<Goal> optimizedGoals,
+                                              OptimizationOptions optimizationOptions) {
+    PriorityQueue<Broker> eligibleBrokers = new PriorityQueue<>((b1, b2) -> {
+      // Brokers are sorted by (1) current offline replica count then (2) all replica count then (3) broker id.
+      int resultByOfflineReplicas = Integer.compare(b2.currentOfflineReplicas().size(), b1.currentOfflineReplicas().size());
+      if (resultByOfflineReplicas == 0) {
+        int resultByAllReplicas = Integer.compare(b2.replicas().size(), b1.replicas().size());
+        return resultByAllReplicas == 0 ? Integer.compare(b1.id(), b2.id()) : resultByAllReplicas;
+      }
+      return resultByOfflineReplicas;
+    });
+
+    // Source broker can be dead, alive, or may have bad disks.
+    if (_fixOfflineReplicasOnly) {
+      clusterModel.brokers().stream().filter(sourceBroker -> sourceBroker.id() != aliveDestBroker.id())
+                  .forEach(eligibleBrokers::add);
+    } else {
+      for (Broker sourceBroker : clusterModel.brokers()) {
+        if (sourceBroker.replicas().size() > _balanceLowerLimit || !sourceBroker.currentOfflineReplicas().isEmpty()) {
+          eligibleBrokers.add(sourceBroker);
+        }
+      }
+    }
+
+    List<Broker> candidateBrokers = Collections.singletonList(aliveDestBroker);
+
+    // Stop when no replicas can be moved in anymore.
+    while (!eligibleBrokers.isEmpty()) {
+      Broker sourceBroker = eligibleBrokers.poll();
+      for (Replica replica : sourceBroker.trackedSortedReplicas(replicaSortName(this, false, false)).sortedReplicas(true)) {
+        Broker b = maybeApplyBalancingAction(clusterModel, replica, candidateBrokers, ActionType.INTER_BROKER_REPLICA_MOVEMENT,
+                                             optimizedGoals, optimizationOptions);
+        // Only need to check status if the action is taken. This will also handle the case that the source broker
+        // has nothing to move in. In that case we will never reenqueue that source broker.
+        if (b != null) {
+          if (aliveDestBroker.replicas().size() >= _balanceLowerLimit) {
+            // Note that the broker passed to this method is always alive; hence, there is no need to check if it is dead.
+            return false;
+          }
+          // If the source broker has a lower number of offline replicas or an equal number of offline replicas, but
+          // more total replicas than the next broker in the eligible broker in the queue, we reenqueue the source broker
+          // and switch to the next broker.
+          if (!eligibleBrokers.isEmpty()) {
+            int result = Integer.compare(sourceBroker.currentOfflineReplicas().size(),
+                                         eligibleBrokers.peek().currentOfflineReplicas().size());
+            if (result == -1 || (result == 0 && sourceBroker.replicas().size() < eligibleBrokers.peek().replicas().size())) {
+              eligibleBrokers.add(sourceBroker);
+              break;
+            }
+          }
+        }
+      }
+    }
+    return true;
   }
 
   private class ReplicaDistributionGoalStatsComparator implements ClusterModelStatsComparator {
@@ -200,9 +294,8 @@ public class ReplicaDistributionGoal extends AbstractGoal {
       double stDev2 = stats2.replicaStats().get(Statistic.ST_DEV).doubleValue();
       int result = AnalyzerUtils.compare(stDev2, stDev1, AnalyzerUtils.EPSILON);
       if (result < 0) {
-        _reasonForLastNegativeResult = String.format("Violated %s. [Standard Deviation of Replica Distribution] "
-                                                         + "post-optimization:%.3f pre-optimization:%.3f",
-                                                     name(), stDev1, stDev2);
+        _reasonForLastNegativeResult = String.format("Violated %s. [Std Deviation of Replica Distribution] post-"
+                                                         + "optimization:%.3f pre-optimization:%.3f", name(), stDev1, stDev2);
       }
       return result;
     }
