@@ -5,44 +5,34 @@
 
 package com.linkedin.kafka.cruisecontrol.analyzer.goals;
 
-import com.linkedin.kafka.cruisecontrol.analyzer.OptimizationOptions;
-import com.linkedin.kafka.cruisecontrol.analyzer.ActionAcceptance;
+import com.google.common.annotations.VisibleForTesting;
 import com.linkedin.kafka.cruisecontrol.analyzer.BalancingConstraint;
-import com.linkedin.kafka.cruisecontrol.analyzer.BalancingAction;
-import com.linkedin.kafka.cruisecontrol.analyzer.ActionType;
+import com.linkedin.kafka.cruisecontrol.analyzer.OptimizationOptions;
+import com.linkedin.kafka.cruisecontrol.analyzer.ProvisionRecommendation;
+import com.linkedin.kafka.cruisecontrol.analyzer.ProvisionResponse;
+import com.linkedin.kafka.cruisecontrol.analyzer.ProvisionStatus;
 import com.linkedin.kafka.cruisecontrol.exception.OptimizationFailureException;
 import com.linkedin.kafka.cruisecontrol.model.Broker;
 import com.linkedin.kafka.cruisecontrol.model.ClusterModel;
-import com.linkedin.kafka.cruisecontrol.model.ClusterModelStats;
 import com.linkedin.kafka.cruisecontrol.model.Replica;
-
 import com.linkedin.kafka.cruisecontrol.model.ReplicaSortFunctionFactory;
 import com.linkedin.kafka.cruisecontrol.model.SortedReplicasHelper;
-import com.linkedin.kafka.cruisecontrol.monitor.ModelCompletenessRequirements;
+import java.util.Comparator;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.SortedSet;
 import java.util.TreeSet;
-import java.util.function.Function;
 import java.util.stream.Collectors;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
 
-import static com.linkedin.kafka.cruisecontrol.analyzer.ActionAcceptance.ACCEPT;
-import static com.linkedin.kafka.cruisecontrol.analyzer.ActionAcceptance.REPLICA_REJECT;
-import static com.linkedin.kafka.cruisecontrol.analyzer.ActionAcceptance.BROKER_REJECT;
-import static com.linkedin.kafka.cruisecontrol.analyzer.goals.GoalUtils.MIN_NUM_VALID_WINDOWS_FOR_SELF_HEALING;
 import static com.linkedin.kafka.cruisecontrol.analyzer.goals.GoalUtils.replicaSortName;
 
 
 /**
  * HARD GOAL: Generate replica movement proposals to provide rack-aware replica distribution.
  */
-public class RackAwareGoal extends AbstractGoal {
-  private static final Logger LOG = LoggerFactory.getLogger(RackAwareGoal.class);
-
+public class RackAwareGoal extends AbstractRackAwareGoal {
   /**
    * Constructor for Rack Capacity Goal.
    */
@@ -53,113 +43,21 @@ public class RackAwareGoal extends AbstractGoal {
   /**
    * Package private for unit test.
    */
+  @VisibleForTesting
   RackAwareGoal(BalancingConstraint constraint) {
     _balancingConstraint = constraint;
   }
 
-  /**
-   * Check whether given action is acceptable by this goal. An action is acceptable by a goal if it satisfies
-   * requirements of the goal. Requirements(hard goal): rack awareness.
-   *
-   * @param action Action to be checked for acceptance.
-   * @param clusterModel The state of the cluster.
-   * @return {@link ActionAcceptance#ACCEPT} if the action is acceptable by this goal,
-   * {@link ActionAcceptance#BROKER_REJECT} if the action is rejected due to violating rack awareness in the destination
-   * broker after moving source replica to destination broker, {@link ActionAcceptance#REPLICA_REJECT} otherwise.
-   */
   @Override
-  public ActionAcceptance actionAcceptance(BalancingAction action, ClusterModel clusterModel) {
-    switch (action.balancingAction()) {
-      case LEADERSHIP_MOVEMENT:
-        return ACCEPT;
-      case INTER_BROKER_REPLICA_MOVEMENT:
-      case INTER_BROKER_REPLICA_SWAP:
-        if (isReplicaMoveViolateRackAwareness(clusterModel,
-                                              c -> c.broker(action.sourceBrokerId()).replica(action.topicPartition()),
-                                              c -> c.broker(action.destinationBrokerId()))) {
-          return BROKER_REJECT;
-        }
-
-        if (action.balancingAction() == ActionType.INTER_BROKER_REPLICA_SWAP
-            && isReplicaMoveViolateRackAwareness(clusterModel,
-                                                 c -> c.broker(action.destinationBrokerId()).replica(action.destinationTopicPartition()),
-                                                 c -> c.broker(action.sourceBrokerId()))) {
-          return REPLICA_REJECT;
-        }
-        return ACCEPT;
-      default:
-        throw new IllegalArgumentException("Unsupported balancing action " + action.balancingAction() + " is provided.");
-    }
-  }
-
-  private boolean isReplicaMoveViolateRackAwareness(ClusterModel clusterModel,
-                                                    Function<ClusterModel, Replica> sourceReplicaFunction,
-                                                    Function<ClusterModel, Broker> destinationBrokerFunction) {
-    Replica sourceReplica = sourceReplicaFunction.apply(clusterModel);
-    Broker destinationBroker = destinationBrokerFunction.apply(clusterModel);
+  protected boolean doesReplicaMoveViolateActionAcceptance(ClusterModel clusterModel, Replica sourceReplica, Broker destinationBroker) {
     // Destination broker cannot be in a rack that violates rack awareness.
     Set<Broker> partitionBrokers = clusterModel.partition(sourceReplica.topicPartition()).partitionBrokers();
     partitionBrokers.remove(sourceReplica.broker());
 
-    // Remove brokers in partition broker racks except the brokers in replica broker rack.
-    for (Broker broker : partitionBrokers) {
-      if (broker.rack().brokers().contains(destinationBroker)) {
-        return true;
-      }
-    }
-
-    return false;
-  }
-
-  @Override
-  public ClusterModelStatsComparator clusterModelStatsComparator() {
-    return new RackAwareGoalStatsComparator();
-  }
-
-  @Override
-  public ModelCompletenessRequirements clusterModelCompletenessRequirements() {
-    // We only need the latest snapshot and include all the topics.
-    return new ModelCompletenessRequirements(MIN_NUM_VALID_WINDOWS_FOR_SELF_HEALING, 0.0, true);
-  }
-
-  /**
-   * Get the name of this goal. Name of a goal provides an identification for the goal in human readable format.
-   */
-  @Override
-  public String name() {
-    return RackAwareGoal.class.getSimpleName();
-  }
-
-  @Override
-  public boolean isHardGoal() {
-    return true;
-  }
-
-  /**
-   * Check if requirements of this goal are not violated if this action is applied to the given cluster state,
-   * false otherwise.
-   *
-   * @param clusterModel The state of the cluster.
-   * @param action Action containing information about potential modification to the given cluster model.
-   * @return True if requirements of this goal are not violated if this action is applied to the given cluster state,
-   * false otherwise.
-   */
-  @Override
-  protected boolean selfSatisfied(ClusterModel clusterModel, BalancingAction action) {
-    return true;
-  }
-
-  /**
-   * This is a hard goal; hence, the proposals are not limited to dead broker replicas in case of self-healing.
-   * Get brokers that the rebalance process will go over to apply balancing actions to replicas they contain.
-   *
-   * @param clusterModel The state of the cluster.
-   * @return A collection of brokers that the rebalance process will go over to apply balancing actions to replicas
-   * they contain.
-   */
-  @Override
-  protected SortedSet<Broker> brokersToBalance(ClusterModel clusterModel) {
-    return clusterModel.brokers();
+    // If destination broker exists on any of the rack of other replicas, it violates the rack-awareness
+    return partitionBrokers.stream()
+                           .map(this::mappedRackIdOf)
+                           .anyMatch(mappedRackIdOf(destinationBroker)::equals);
   }
 
   /**
@@ -173,7 +71,8 @@ public class RackAwareGoal extends AbstractGoal {
   protected void initGoalState(ClusterModel clusterModel, OptimizationOptions optimizationOptions)
       throws OptimizationFailureException {
     // Sanity Check: not enough racks to satisfy rack awareness.
-    int numAliveRacks = clusterModel.numAliveRacks();
+    // Assumes number of racks doesn't exceed Integer.MAX_VALUE
+    int numAliveRacks = (int) clusterModel.aliveRacks().stream().map(this::mappedRackIdOf).distinct().count();
     Set<String> excludedTopics = optimizationOptions.excludedTopics();
     if (!excludedTopics.isEmpty()) {
       int maxReplicationFactorOfIncludedTopics = 1;
@@ -184,30 +83,43 @@ public class RackAwareGoal extends AbstractGoal {
           maxReplicationFactorOfIncludedTopics =
               Math.max(maxReplicationFactorOfIncludedTopics, replicationFactorByTopicEntry.getValue());
           if (maxReplicationFactorOfIncludedTopics > numAliveRacks) {
+            int missingRacks = maxReplicationFactorOfIncludedTopics - numAliveRacks;
+            ProvisionRecommendation recommendation = new ProvisionRecommendation.Builder(ProvisionStatus.UNDER_PROVISIONED)
+                .numRacks(missingRacks).build();
             throw new OptimizationFailureException(
                 String.format("[%s] Insufficient number of racks to distribute included replicas (Current: %d, Needed: %d).",
-                              name(), numAliveRacks, maxReplicationFactorOfIncludedTopics));
+                              name(), numAliveRacks, maxReplicationFactorOfIncludedTopics), recommendation);
           }
         }
       }
     } else if (clusterModel.maxReplicationFactor() > numAliveRacks) {
+      int missingRacks = clusterModel.maxReplicationFactor() - numAliveRacks;
+      ProvisionRecommendation recommendation = new ProvisionRecommendation.Builder(ProvisionStatus.UNDER_PROVISIONED)
+          .numRacks(missingRacks).build();
       throw new OptimizationFailureException(
           String.format("[%s] Insufficient number of racks to distribute each replica (Current: %d, Needed: %d).",
-                        name(), numAliveRacks, clusterModel.maxReplicationFactor()));
+                        name(), numAliveRacks, clusterModel.maxReplicationFactor()), recommendation);
+    }
+    int numExtraRacks = numAliveRacks - clusterModel.maxReplicationFactor();
+    if (numExtraRacks >= _balancingConstraint.overprovisionedMinExtraRacks()) {
+      int numRacksToDrop = numExtraRacks - _balancingConstraint.overprovisionedMinExtraRacks() + 1;
+      ProvisionRecommendation recommendation = new ProvisionRecommendation.Builder(ProvisionStatus.OVER_PROVISIONED)
+          .numRacks(numRacksToDrop).build();
+      _provisionResponse = new ProvisionResponse(ProvisionStatus.OVER_PROVISIONED, recommendation, name());
     }
 
     // Filter out some replicas based on optimization options.
     new SortedReplicasHelper().maybeAddSelectionFunc(ReplicaSortFunctionFactory.selectImmigrants(),
                                                      optimizationOptions.onlyMoveImmigrantReplicas())
-                              .addSelectionFunc(ReplicaSortFunctionFactory.selectReplicasBasedOnExcludedTopics(excludedTopics))
+                              .maybeAddSelectionFunc(ReplicaSortFunctionFactory.selectReplicasBasedOnExcludedTopics(excludedTopics),
+                                                     !excludedTopics.isEmpty())
                               .trackSortedReplicasFor(replicaSortName(this, false, false), clusterModel);
   }
 
   /**
    * Update goal state.
-   * (1) Sanity check: After completion of balancing / self-healing all resources, confirm that replicas of each
-   * partition reside at a separate rack and finish.
-   * (2) Update the current resource that is being balanced if there are still resources to be balanced.
+   * Sanity check: After completion of balancing / self-healing, confirm that replicas of each partition reside at a
+   * separate rack.
    *
    * @param clusterModel The state of the cluster.
    * @param optimizationOptions Options to take into account during optimization.
@@ -222,12 +134,10 @@ public class RackAwareGoal extends AbstractGoal {
     GoalUtils.ensureNoOfflineReplicas(clusterModel, name());
     // Sanity check: No replica should be moved to a broker, which used to host any replica of the same partition on its broken disk.
     GoalUtils.ensureReplicasMoveOffBrokersWithBadDisks(clusterModel, name());
+    if (_provisionResponse.status() != ProvisionStatus.OVER_PROVISIONED) {
+      _provisionResponse = new ProvisionResponse(ProvisionStatus.RIGHT_SIZED);
+    }
     finish();
-  }
-
-  @Override
-  public void finish() {
-    _finished = true;
   }
 
   /**
@@ -242,20 +152,8 @@ public class RackAwareGoal extends AbstractGoal {
   protected void rebalanceForBroker(Broker broker,
                                     ClusterModel clusterModel,
                                     Set<Goal> optimizedGoals,
-                                    OptimizationOptions optimizationOptions)
-      throws OptimizationFailureException {
-    LOG.debug("balancing broker {}, optimized goals = {}", broker, optimizedGoals);
-    for (Replica replica : broker.trackedSortedReplicas(replicaSortName(this, false, false)).sortedReplicas(true)) {
-      if (broker.isAlive() && !broker.currentOfflineReplicas().contains(replica) && satisfiedRackAwareness(replica, clusterModel)) {
-        continue;
-      }
-      // Rack awareness is violated. Move replica to a broker in another rack.
-      if (maybeApplyBalancingAction(clusterModel, replica, rackAwareEligibleBrokers(replica, clusterModel),
-                                    ActionType.INTER_BROKER_REPLICA_MOVEMENT, optimizedGoals, optimizationOptions) == null) {
-        throw new OptimizationFailureException(
-            String.format("[%s] Violated rack-awareness requirement for broker with id %d.", name(), broker.id()));
-      }
-    }
+                                    OptimizationOptions optimizationOptions) throws OptimizationFailureException {
+    rebalanceForBroker(broker, clusterModel, optimizedGoals, optimizationOptions, true);
   }
 
   private void ensureRackAware(ClusterModel clusterModel, OptimizationOptions optimizationOptions)
@@ -272,16 +170,17 @@ public class RackAwareGoal extends AbstractGoal {
 
       // Add rack Id of replicas.
       for (Broker followerBroker : followerBrokers) {
-        String followerRackId = followerBroker.rack().id();
+        String followerRackId = mappedRackIdOf(followerBroker);
         replicaBrokersRackIds.add(followerRackId);
       }
-      replicaBrokersRackIds.add(leader.broker().rack().id());
+      replicaBrokersRackIds.add(mappedRackIdOf(leader.broker()));
       if (replicaBrokersRackIds.size() != (followerBrokers.size() + 1)) {
-        String mitigation = GoalUtils.mitigationForOptimizationFailures(optimizationOptions);
-        throw new OptimizationFailureException(String.format("Optimization for goal %s failed for rack-awareness of "
-                                                             + "partition %s. Leader (%s) and follower brokers (%s). %s",
-                                                             name(), leader.topicPartition(), leader.broker(),
-                                                             followerBrokers, mitigation));
+        int missingRacks = (followerBrokers.size() + 1) - replicaBrokersRackIds.size();
+        ProvisionRecommendation recommendation = new ProvisionRecommendation.Builder(ProvisionStatus.UNDER_PROVISIONED)
+            .numRacks(missingRacks).build();
+        throw new OptimizationFailureException(String.format("[%s] Partition %s is not rack-aware. Leader (%s) and follower brokers (%s).",
+                                                             name(), leader.topicPartition(), leader.broker(), followerBrokers),
+                                               recommendation);
       }
     }
   }
@@ -295,19 +194,19 @@ public class RackAwareGoal extends AbstractGoal {
    * @param clusterModel The state of the cluster.
    * @return A list of rack aware eligible brokers for the given replica in the given cluster.
    */
-  private SortedSet<Broker> rackAwareEligibleBrokers(Replica replica, ClusterModel clusterModel) {
+  @Override
+  protected SortedSet<Broker> rackAwareEligibleBrokers(Replica replica, ClusterModel clusterModel) {
     // Populate partition rack ids.
     List<String> partitionRackIds = clusterModel.partition(replica.topicPartition()).partitionBrokers()
-        .stream().map(partitionBroker -> partitionBroker.rack().id()).collect(Collectors.toList());
+                                                .stream().map(this::mappedRackIdOf).collect(Collectors.toList());
 
     // Remove rack id of the given replica, but if there is any other replica from the partition residing in the
     // same cluster, keep its rack id in the list.
-    partitionRackIds.remove(replica.broker().rack().id());
+    partitionRackIds.remove(mappedRackIdOf(replica.broker()));
 
-    SortedSet<Broker> rackAwareEligibleBrokers = new TreeSet<>((o1, o2) -> {
-      return Integer.compare(o1.id(), o2.id()); });
+    SortedSet<Broker> rackAwareEligibleBrokers = new TreeSet<>(Comparator.comparingInt(Broker::id));
     for (Broker broker : clusterModel.aliveBrokers()) {
-      if (!partitionRackIds.contains(broker.rack().id())) {
+      if (!partitionRackIds.contains(mappedRackIdOf(broker))) {
         rackAwareEligibleBrokers.add(broker);
       }
     }
@@ -315,37 +214,16 @@ public class RackAwareGoal extends AbstractGoal {
     return rackAwareEligibleBrokers;
   }
 
-  /**
-   * Check whether given replica satisfies rack awareness in the given cluster state. Rack awareness requires no more
-   * than one replica from a given partition residing in any rack in the cluster.
-   *
-   * @param replica      Replica to check for other replicas in the same rack.
-   * @param clusterModel The state of the cluster.
-   * @return True if there is no other replica from the same partition of the given replica in the same rack, false
-   * otherwise.
-   */
-  private boolean satisfiedRackAwareness(Replica replica, ClusterModel clusterModel) {
-    String myRackId = replica.broker().rack().id();
+  @Override
+  protected boolean shouldKeepInTheCurrentBroker(Replica replica, ClusterModel clusterModel) {
+    // Rack awareness requires no more than one replica from a given partition residing in any rack in the cluster
+    String myRackId = mappedRackIdOf(replica.broker());
     int myBrokerId = replica.broker().id();
     for (Broker partitionBroker : clusterModel.partition(replica.topicPartition()).partitionBrokers()) {
-      if (myRackId.equals(partitionBroker.rack().id()) && myBrokerId != partitionBroker.id()) {
+      if (myRackId.equals(mappedRackIdOf(partitionBroker)) && myBrokerId != partitionBroker.id()) {
         return false;
       }
     }
     return true;
-  }
-
-  private static class RackAwareGoalStatsComparator implements ClusterModelStatsComparator {
-
-    @Override
-    public int compare(ClusterModelStats stats1, ClusterModelStats stats2) {
-      // This goal do not care about stats. The optimization would have already failed if the goal is not met.
-      return 0;
-    }
-
-    @Override
-    public String explainLastComparison() {
-      return null;
-    }
   }
 }

@@ -5,12 +5,20 @@
 
 package com.linkedin.kafka.cruisecontrol.analyzer.goals;
 
-import com.linkedin.kafka.cruisecontrol.analyzer.OptimizationOptions;
 import com.linkedin.kafka.cruisecontrol.analyzer.ActionType;
+import com.linkedin.kafka.cruisecontrol.analyzer.BalancingConstraint;
+import com.linkedin.kafka.cruisecontrol.analyzer.OptimizationOptions;
+import com.linkedin.kafka.cruisecontrol.analyzer.ProvisionRecommendation;
+import com.linkedin.kafka.cruisecontrol.analyzer.ProvisionResponse;
+import com.linkedin.kafka.cruisecontrol.analyzer.ProvisionStatus;
+import com.linkedin.kafka.cruisecontrol.analyzer.goals.rackaware.RackAwareGoalRackIdMapper;
 import com.linkedin.kafka.cruisecontrol.common.Resource;
+import com.linkedin.kafka.cruisecontrol.config.KafkaCruiseControlConfig;
+import com.linkedin.kafka.cruisecontrol.config.constants.AnalyzerConfig;
 import com.linkedin.kafka.cruisecontrol.exception.OptimizationFailureException;
 import com.linkedin.kafka.cruisecontrol.model.Broker;
 import com.linkedin.kafka.cruisecontrol.model.ClusterModel;
+import com.linkedin.kafka.cruisecontrol.model.ClusterModelStats;
 import com.linkedin.kafka.cruisecontrol.model.Disk;
 import com.linkedin.kafka.cruisecontrol.model.Replica;
 import java.util.ArrayList;
@@ -18,6 +26,7 @@ import java.util.Collection;
 import java.util.Collections;
 import java.util.HashSet;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 import java.util.SortedSet;
 import java.util.stream.Collectors;
@@ -32,13 +41,64 @@ import static com.linkedin.kafka.cruisecontrol.servlet.parameters.ParameterUtils
 /**
  * A util class for goals.
  */
-public class GoalUtils {
+public final class GoalUtils {
+  // Intra-broker goals require a minimum number of valid windows to start self-healing. Goals that rely on topology or
+  // just the latest window, require at least MIN_NUM_VALID_WINDOWS_FOR_SELF_HEALING valid windows. Whereas, if goals
+  // rely on historical resource utilization, then they require at least Math.max(MIN_NUM_VALID_WINDOWS_FOR_SELF_HEALING,
+  // number-of-windows / DENOMINATOR_FOR_MIN_VALID_WINDOWS_FOR_SELF_HEALING) valid windows for starting self-healing.
   public static final int MIN_NUM_VALID_WINDOWS_FOR_SELF_HEALING = 1;
+  public static final int DENOMINATOR_FOR_MIN_VALID_WINDOWS_FOR_SELF_HEALING = 14;
   private static final double DEAD_BROKER_UTILIZATION = 1.0;
   private static final double DEAD_DISK_UTILIZATION = 1.0;
+  private static final String KAFKA_CRUISE_CONTROL_OBJECT_CONFIG = "kafka.cruise.control.object";
 
   private GoalUtils() {
 
+  }
+
+  /**
+   * @param config The configurations for Cruise Control.
+   * @return Configured {@link RackAwareGoalRackIdMapper} instance
+   */
+
+  public static RackAwareGoalRackIdMapper getRackAwareGoalRackIdMapper(KafkaCruiseControlConfig config) {
+    return config.getConfiguredInstance(AnalyzerConfig.RACK_AWARE_GOAL_RACK_ID_MAPPER_CLASS_CONFIG,
+                                        RackAwareGoalRackIdMapper.class);
+  }
+
+  /**
+   * @param configs The configs used to configure {@link Goal} instance.
+   * @return Configured {@link RackAwareGoalRackIdMapper} instance
+   */
+  public static RackAwareGoalRackIdMapper getRackAwareGoalRackIdMapper(Map<String, ?> configs) {
+    return getRackAwareGoalRackIdMapper(new KafkaCruiseControlConfig(configs));
+  }
+
+  /**
+   * Get the remaining time in milliseconds based on the given timout and start time.
+   *
+   * @param timeoutMs Timeout in milliseconds.
+   * @param startTimeMs Start time in milliseconds.
+   * @return Remaining time in milliseconds.
+   */
+  protected static long remainingTimeMs(long timeoutMs, long startTimeMs) {
+    return timeoutMs - (System.currentTimeMillis() - startTimeMs);
+  }
+
+  /**
+   * A convenience {@link com.linkedin.kafka.cruisecontrol.analyzer.goals.Goal.ClusterModelStatsComparator} for typical hard goals.
+   */
+  public static class HardGoalStatsComparator implements Goal.ClusterModelStatsComparator {
+    @Override
+    public int compare(ClusterModelStats stats1, ClusterModelStats stats2) {
+      // Stats are irrelevant to a hard goal. The optimization would already fail if the goal requirements are not met.
+      return 0;
+    }
+
+    @Override
+    public String explainLastComparison() {
+      return null;
+    }
   }
 
   /**
@@ -59,12 +119,12 @@ public class GoalUtils {
    * @param replica Replica affected from the action.
    * @param action Action that affects the given replica.
    */
-  private static void filterOutBrokersExcludedForLeadership(List<Broker> originalBrokers,
-                                                            OptimizationOptions optimizationOptions,
-                                                            Replica replica,
-                                                            ActionType action) {
+  public static void filterOutBrokersExcludedForLeadership(List<Broker> originalBrokers,
+                                                           OptimizationOptions optimizationOptions,
+                                                           Replica replica,
+                                                           ActionType action) {
     Set<Integer> requestedDestinationBrokerIds = optimizationOptions.requestedDestinationBrokerIds();
-    if (requestedDestinationBrokerIds.isEmpty() || (action == ActionType.LEADERSHIP_MOVEMENT)) {
+    if (requestedDestinationBrokerIds.isEmpty() || action == ActionType.LEADERSHIP_MOVEMENT) {
       Set<Integer> excludedBrokers = optimizationOptions.excludedBrokersForLeadership();
       if (!excludedBrokers.isEmpty() && (action == ActionType.LEADERSHIP_MOVEMENT || replica.isLeader())) {
         originalBrokers.removeIf(broker -> excludedBrokers.contains(broker.id()));
@@ -88,9 +148,9 @@ public class GoalUtils {
    * @param optimizationOptions Options to take into account while filtering out brokers.
    * @param action Action that affects the given replica.
    */
-  private static void filterOutBrokersExcludedForReplicaMove(List<Broker> originalBrokers,
-                                                             OptimizationOptions optimizationOptions,
-                                                             ActionType action) {
+  public static void filterOutBrokersExcludedForReplicaMove(List<Broker> originalBrokers,
+                                                            OptimizationOptions optimizationOptions,
+                                                            ActionType action) {
     Set<Integer> requestedDestinationBrokerIds = optimizationOptions.requestedDestinationBrokerIds();
     if (requestedDestinationBrokerIds.isEmpty()) {
       Set<Integer> excludedBrokers = optimizationOptions.excludedBrokersForReplicaMove();
@@ -118,11 +178,11 @@ public class GoalUtils {
    * @param optimizationOptions Options to take into account while applying the given action.
    * @return List of eligible brokers with a fixed order.
    */
-  static List<Broker> eligibleBrokers(ClusterModel clusterModel,
-                                      Replica replica,
-                                      Collection<Broker> candidates,
-                                      ActionType action,
-                                      OptimizationOptions optimizationOptions) {
+  public static List<Broker> eligibleBrokers(ClusterModel clusterModel,
+                                             Replica replica,
+                                             Collection<Broker> candidates,
+                                             ActionType action,
+                                             OptimizationOptions optimizationOptions) {
     List<Broker> eligibleBrokers = new ArrayList<>(candidates);
     filterOutBrokersExcludedForLeadership(eligibleBrokers, optimizationOptions, replica, action);
     filterOutBrokersExcludedForReplicaMove(eligibleBrokers, optimizationOptions, action);
@@ -148,12 +208,12 @@ public class GoalUtils {
    * @param destinationBroker Destination broker.
    * @param clusterModel Cluster model.
    * @param actionType Action type.
-   * @return True if the move is legit, false otherwise.
+   * @return {@code true} if the move is legit, {@code false} otherwise.
    */
-  static boolean legitMove(Replica replica,
-                           Broker destinationBroker,
-                           ClusterModel clusterModel,
-                           ActionType actionType) {
+  public static boolean legitMove(Replica replica,
+                                  Broker destinationBroker,
+                                  ClusterModel clusterModel,
+                                  ActionType actionType) {
     switch (actionType) {
       case INTER_BROKER_REPLICA_MOVEMENT:
         return clusterModel.partition(replica.topicPartition()).canAssignReplicaToBroker(destinationBroker)
@@ -172,11 +232,11 @@ public class GoalUtils {
    * @param replica Replica that is affected from the given action type.
    * @param destinationDisk Destination disk.
    * @param actionType Action type.
-   * @return True if the move is legit, false otherwise.
+   * @return {@code true} if the move is legit, {@code false} otherwise.
    */
-  static boolean legitMoveBetweenDisks(Replica replica,
-                                       Disk destinationDisk,
-                                       ActionType actionType) {
+  public static boolean legitMoveBetweenDisks(Replica replica,
+                                              Disk destinationDisk,
+                                              ActionType actionType) {
     return actionType == ActionType.INTRA_BROKER_REPLICA_MOVEMENT
            && destinationDisk != null
            && destinationDisk.broker() == replica.broker()
@@ -195,10 +255,10 @@ public class GoalUtils {
    * @param optimizationOptions Options to take into account while applying the given action.
    * @return Eligible replicas for swap.
    */
-  static SortedSet<Replica> eligibleReplicasForSwap(ClusterModel clusterModel,
-                                                    Replica sourceReplica,
-                                                    SortedSet<Replica> candidateReplicas,
-                                                    OptimizationOptions optimizationOptions) {
+  public static SortedSet<Replica> eligibleReplicasForSwap(ClusterModel clusterModel,
+                                                           Replica sourceReplica,
+                                                           SortedSet<Replica> candidateReplicas,
+                                                           OptimizationOptions optimizationOptions) {
     if (candidateReplicas.isEmpty()) {
       return candidateReplicas;
     }
@@ -249,9 +309,10 @@ public class GoalUtils {
     // Sanity check: No self-healing eligible replica should remain at a decommissioned broker or on broken disk.
     for (Replica replica : clusterModel.selfHealingEligibleReplicas()) {
       if (replica.isCurrentOffline()) {
-        throw new OptimizationFailureException(String.format(
-            "[%s] Self healing failed to move the replica %s from %s broker %d (contains %d replicas).",
-            goalName, replica, replica.broker().state(), replica.broker().id(), replica.broker().replicas().size()));
+        ProvisionRecommendation recommendation = new ProvisionRecommendation.Builder(ProvisionStatus.UNDER_PROVISIONED).numBrokers(1).build();
+        Broker broker = replica.broker();
+        throw new OptimizationFailureException(String.format("[%s] Cannot remove %s from %s broker %d (has %d replicas).", goalName,
+                                                             replica, broker.state(), broker.id(), broker.replicas().size()), recommendation);
       }
     }
   }
@@ -269,9 +330,10 @@ public class GoalUtils {
     for (Broker broker : clusterModel.brokersWithBadDisks()) {
       for (Replica replica : broker.replicas()) {
         if (!clusterModel.partition(replica.topicPartition()).canAssignReplicaToBroker(broker)) {
-          throw new OptimizationFailureException(String.format(
-              "[%s] A replica of partition %s has been moved back to broker %d, where it was originally hosted on a "
-              + "broken disk.", goalName, clusterModel.partition(replica.topicPartition()), replica.broker().id()));
+          ProvisionRecommendation recommendation = new ProvisionRecommendation.Builder(ProvisionStatus.UNDER_PROVISIONED).numBrokers(1).build();
+          throw new OptimizationFailureException(String.format("[%s] A replica of %s was moved back to broker %d with broken disk.", goalName,
+                                                               clusterModel.partition(replica.topicPartition()), replica.broker().id()),
+                                                 recommendation);
         }
       }
     }
@@ -281,10 +343,10 @@ public class GoalUtils {
    * Get a filtered set of leaders from the given broker based on given filtering requirements.
    *
    * @param broker Broker whose replicas will be filters.
-   * @param immigrantsOnly True if replicas should be filtered to ensure that they contain only the immigrants.
+   * @param immigrantsOnly {@code true} if replicas should be filtered to ensure that they contain only the immigrants.
    * @return A filtered set of leaders from the given broker based on given filtering requirements.
    */
-  private static Set<Replica> filterLeaders(Broker broker, boolean immigrantsOnly) {
+  public static Set<Replica> filterLeaders(Broker broker, boolean immigrantsOnly) {
     Set<Replica> filteredLeaders;
     if (immigrantsOnly) {
       filteredLeaders = new HashSet<>(broker.immigrantReplicas());
@@ -296,15 +358,14 @@ public class GoalUtils {
   }
 
   /**
-   * Get the utilization percentage of the broker for the given resource, or {@link #DEAD_BROKER_UTILIZATION} if the
-   * broker is dead. The utilization percentage for resources is calculated from broker capacity and
-   * {@link com.linkedin.kafka.cruisecontrol.model.Load#expectedUtilizationFor(Resource)} .
+   * Get the utilization of the broker for the given resource, or {@link #DEAD_BROKER_UTILIZATION} if the broker is dead.
+   * The utilization of an alive broker corresponds to the ratio of its expected utilization to its capacity.
    *
    * @param broker Broker for which the resource utilization percentage has been queried.
    * @param resource Resource for the utilization percentage.
-   * @return Utilization percentage of the broker for the given resource.
+   * @return Utilization of the broker for the given resource as a double in [0.0,1.0].
    */
-  public static double utilizationPercentage(Broker broker, Resource resource) {
+  public static double utilization(Broker broker, Resource resource) {
     double brokerCapacity = broker.capacityFor(resource);
     return brokerCapacity > 0 ? broker.load().expectedUtilizationFor(resource) / brokerCapacity : DEAD_BROKER_UTILIZATION;
   }
@@ -345,7 +406,7 @@ public class GoalUtils {
    * @param replicas A list of replicas to be sorted by the amount of resources that their broker contains.
    * @param resource Resource for which the given replicas will be sorted.
    */
-  static void sortReplicasInAscendingOrderByBrokerResourceUtilization(List<Replica> replicas, Resource resource) {
+  public static void sortReplicasInAscendingOrderByBrokerResourceUtilization(List<Replica> replicas, Resource resource) {
     replicas.sort((r1, r2) -> {
       double expectedBrokerLoad1 = r1.broker().load().expectedUtilizationFor(resource);
       double expectedBrokerLoad2 = r2.broker().load().expectedUtilizationFor(resource);
@@ -363,8 +424,63 @@ public class GoalUtils {
    * @param leaderOnly Whether the {@link com.linkedin.kafka.cruisecontrol.model.SortedReplicas} tracks only leader replicas or all replicas.
    * @return A descriptive name for the {@link com.linkedin.kafka.cruisecontrol.model.SortedReplicas}.
    */
-  static String replicaSortName(Goal goal, boolean reverse, boolean leaderOnly) {
+  public static String replicaSortName(Goal goal, boolean reverse, boolean leaderOnly) {
     return String.format("%s%s%s", goal.name(), reverse ? "-REVERSE" : "", leaderOnly ? "-LEADER" : "");
+  }
+
+  /**
+   * Get the set of topics to rebalance for a soft goal.
+   *
+   * @param clusterModel The state of the cluster.
+   * @param excludedTopics The topics to exclude from rebalance.
+   * @return Topics of self-healing eligible replicas if the given cluster model has any, all topics except the given
+   * excluded topics otherwise.
+   */
+  public static Set<String> topicsToRebalance(ClusterModel clusterModel, Set<String> excludedTopics) {
+    Set<String> topicsToRebalance;
+    if (!clusterModel.selfHealingEligibleReplicas().isEmpty()) {
+      topicsToRebalance = new HashSet<>();
+      for (Replica replica : clusterModel.selfHealingEligibleReplicas()) {
+        topicsToRebalance.add(replica.topicPartition().topic());
+      }
+    } else {
+      topicsToRebalance = new HashSet<>(clusterModel.topics());
+      topicsToRebalance.removeAll(excludedTopics);
+    }
+
+    return topicsToRebalance;
+  }
+
+  /**
+   * Retain the subset of the given replicas that are currently offline and reside in the given broker.
+   *
+   * @param broker Broker, whose current offline replicas will be retrieved.
+   * @param replicas Replicas, whose subset will be retained in a new set.
+   * @return A new set of replicas that are currently offline and reside in the given broker.
+   */
+  public static Set<Replica> retainCurrentOfflineBrokerReplicas(Broker broker, Collection<Replica> replicas) {
+    Set<Replica> offlineReplicas = new HashSet<>(replicas);
+    offlineReplicas.retainAll(broker.currentOfflineReplicas());
+
+    return offlineReplicas;
+  }
+
+  /**
+   * Retrieve alive broker ids that are not excluded for replica moves.
+   * Returns a hashset to provide constant time lookup guaranteed by a HashSet.
+   *
+   * @param clusterModel The state of the cluster.
+   * @param optimizationOptions Options to retrieve excluded brokers for replica move
+   * @return Alive broker ids that are not excluded for replica moves.
+   */
+  public static HashSet<Integer> aliveBrokersNotExcludedForReplicaMove(ClusterModel clusterModel,
+                                                                       OptimizationOptions optimizationOptions) {
+    Set<Integer> excludedBrokers = optimizationOptions.excludedBrokersForReplicaMove();
+    return clusterModel.aliveBrokers()
+                       .stream()
+                       .map(Broker::id)
+                       .filter(id -> !excludedBrokers.contains(id))
+                       .collect(Collectors.toCollection(HashSet::new));
   }
 
   /**
@@ -374,39 +490,162 @@ public class GoalUtils {
    * @param optimizationOptions Options to take into account during optimization.
    * @return A message that is intended to help with the mitigation of of optimization failures.
    */
-  static String mitigationForOptimizationFailures(OptimizationOptions optimizationOptions) {
+  public static String mitigationForOptimizationFailures(OptimizationOptions optimizationOptions) {
     StringBuilder sb = new StringBuilder();
+    int mitigationId = 0;
 
     if (optimizationOptions.onlyMoveImmigrantReplicas()) {
-      sb.append(String.format("The optimization is limited to replicas to be added to/removed from brokers. Potential "
-                              + "mitigation: First, rebalance the cluster using %s endpoint with a a superset of "
-                              + "hard-goals defined via %s config.%n", REBALANCE, HARD_GOALS_CONFIG));
+      sb.append(String.format("[%d] The optimization is limited to replicas to be added to/removed from brokers. Potential "
+                              + "mitigation: First, rebalance the cluster using %s endpoint with a superset of "
+                              + "hard-goals defined via %s config.", ++mitigationId, REBALANCE, HARD_GOALS_CONFIG));
     }
     if (!optimizationOptions.requestedDestinationBrokerIds().isEmpty()) {
-      sb.append(String.format("The destination brokers are limited to %s. Potential mitigation: Relax the constraint "
-                              + "on destination brokers using %s parameter.%n",
+      sb.append(String.format("[%d] The destination brokers are limited to %s. Potential mitigation: Relax the constraint "
+                              + "on destination brokers using %s parameter.", ++mitigationId,
                               optimizationOptions.requestedDestinationBrokerIds(), DESTINATION_BROKER_IDS_PARAM));
     }
     if (!optimizationOptions.excludedBrokersForReplicaMove().isEmpty()) {
-      sb.append(String.format("The following brokers are excluded from replica moves %s. Potential mitigation:"
-                              + " Drop brokers from exclusion for replica move using %s endpoint.%n",
+      sb.append(String.format("[%d] The following brokers are excluded from replica moves %s. Potential mitigation:"
+                              + " Drop excluded brokers using %s endpoint.", ++mitigationId,
                               optimizationOptions.excludedBrokersForReplicaMove(), ADMIN));
     }
     if (!optimizationOptions.excludedBrokersForLeadership().isEmpty()) {
-      sb.append(String.format("The following brokers are excluded from leadership moves %s. Potential mitigation:"
-                              + " Drop brokers from exclusion for leadership move using %s endpoint.%n",
+      sb.append(String.format("[%d] The following brokers are excluded from leadership moves %s. Potential mitigation:"
+                              + " Drop brokers from exclusion for leadership move using %s endpoint.", ++mitigationId,
                               optimizationOptions.excludedBrokersForReplicaMove(), ADMIN));
     }
     if (!optimizationOptions.excludedTopics().isEmpty()) {
-      sb.append(String.format("There are %d topics excluded from replica move. Potential mitigation: Remove selected "
-                              + "topics from exclusion using %s parameter.%n", optimizationOptions.excludedTopics().size(),
+      sb.append(String.format("[%d] There are %d topics excluded from replica move. Potential mitigation: Remove selected "
+                              + "topics from exclusion using %s parameter.", ++mitigationId, optimizationOptions.excludedTopics().size(),
                               EXCLUDED_TOPICS_PARAM));
     }
 
     if (sb.length() > 0) {
-      sb.append(String.format("Then, re-run your original request.%n"));
+      sb.append(" Then, re-run your original request.");
     }
 
     return sb.toString();
+  }
+
+  /**
+   * Compute the utilization upper/lower threshold in percent for the given type of resource.
+   *  There are two cases described below (note that this description demonstrates the general idea):
+   *
+   *    1. Low utilization case (the average utilization percentage is not greater than the low utilization threshold
+   *      Threshold lower bound = zero
+   *      Threshold upper bound = the low utilization threshold multiplied with the balance margin
+   *
+   *    2. Not low utilization case
+   *      Threshold lower bound = average utilization * (1 - balance percentage * balance margin)
+   *      Threshold upper bound = average utilization * (1 + balance percentage * balance margin)
+   *
+   * @param avgUtilizationPercentage Average cluster utilization that excludes the capacity of brokers excluded for replica moves.
+   * @param resource {@link Resource}
+   * @param balancingConstraint Balancing constraint
+   * @param isTriggeredByGoalViolation whether this computation is triggered by goal violation.
+   * @param balanceMargin resource distribution goal balance margin
+   * @param isLowerThreshold whether this method calculates resource utilization threshold upper bound or lower bound
+   * @return The utilization upper/lower threshold in percent for the given type of resource
+   */
+  public static double computeResourceUtilizationBalanceThreshold(double avgUtilizationPercentage,
+                                                                  Resource resource,
+                                                                  BalancingConstraint balancingConstraint,
+                                                                  boolean isTriggeredByGoalViolation,
+                                                                  double balanceMargin,
+                                                                  boolean isLowerThreshold) {
+
+    if (balanceMargin >= 1) {
+      throw new IllegalArgumentException("Balance margin must be less than 1.0. Got: " + balanceMargin);
+    }
+    boolean isLowUtilization = avgUtilizationPercentage <= balancingConstraint.lowUtilizationThreshold(resource);
+
+    if (isLowerThreshold) {
+      if (isLowUtilization) {
+        return 0.0;
+      }
+      double balancePercentageWithMargin =
+          balancePercentageWithMargin(isTriggeredByGoalViolation, balancingConstraint, resource, balanceMargin);
+      return avgUtilizationPercentage * Math.max(0, (1 - balancePercentageWithMargin));
+
+    } else {
+      double balancePercentageWithMargin =
+          balancePercentageWithMargin(isTriggeredByGoalViolation, balancingConstraint, resource, balanceMargin);
+      double resourceBalanceThreshold = avgUtilizationPercentage * (1 + balancePercentageWithMargin);
+      if (isLowUtilization) {
+        return Math.max(resourceBalanceThreshold, balancingConstraint.lowUtilizationThreshold(resource) * balanceMargin);
+      }
+      return resourceBalanceThreshold;
+    }
+  }
+
+  /**
+   * To avoid churns, we add a balance margin to the user specified rebalance threshold. e.g. when user sets the
+   * threshold to be resourceBalancePercentage, we use (resourceBalancePercentage-1)*balanceMargin instead.
+   *
+   * @param isTriggeredByGoalViolation whether this computation is triggered by goal violation.
+   * @param balancingConstraint Balancing constraint
+   * @param resource Resource for which the balance percentage with margin gets calculated
+   * @param balanceMargin resource distribution goal balance margin
+   * @return The rebalance threshold with a margin.
+   */
+  private static double balancePercentageWithMargin(boolean isTriggeredByGoalViolation,
+                                                    BalancingConstraint balancingConstraint,
+                                                    Resource resource,
+                                                    double balanceMargin) {
+
+    double balancePercentage = balancingConstraint.resourceBalancePercentage(resource);
+    if (isTriggeredByGoalViolation) {
+      // Make the balance threshold percentage more lenient in this case
+      balancePercentage *= balancingConstraint.goalViolationDistributionThresholdMultiplier();
+    }
+    return (balancePercentage - 1) * balanceMargin;
+  }
+
+  /**
+   * This method validates that provision response is {@link ProvisionStatus#OVER_PROVISIONED} only if:
+   * <ul>
+   *   <li>Number of alive brokers is larger than or equal to the value of {@link AnalyzerConfig#OVERPROVISIONED_MIN_BROKERS_CONFIG}.</li>
+   *   <li>Expected number of alive brokers after the provisioning will still be larger than or equal to the maximum replication factor.</li>
+   * </ul>
+   * if any of the above conditions is violated then provision response is set to {@link ProvisionStatus#RIGHT_SIZED}
+   *
+   * @param provisionResponse Provision response after goal is optimization
+   * @param clusterModel Cluster usage model
+   * @param overprovisionedMinBrokers value of the {@link AnalyzerConfig#OVERPROVISIONED_MIN_BROKERS_CONFIG}
+   * @return Validated provision response
+   * @throws IllegalArgumentException when provision status is {@link ProvisionStatus#OVER_PROVISIONED}
+   * and goal doesn't have exactly one recommendation
+   */
+  public static ProvisionResponse validateProvisionResponse(ProvisionResponse provisionResponse, ClusterModel clusterModel,
+                                                            int overprovisionedMinBrokers) {
+    if (provisionResponse.status() != ProvisionStatus.OVER_PROVISIONED) {
+      return provisionResponse;
+    }
+    // ensure that a cluster is not identified as over provisioned unless it has the minimum required number of alive brokers
+    if (clusterModel.aliveBrokers().size() < overprovisionedMinBrokers) {
+      return new ProvisionResponse(ProvisionStatus.RIGHT_SIZED);
+    }
+    // when status is OVER_PROVISIONED goal is expected to have exactly 1 recommendation
+    if (provisionResponse.recommendationByRecommender().size() != 1) {
+      throw new IllegalArgumentException(String.format("Expected to have exactly 1 provision recommendation, but got: %d",
+                                                       provisionResponse.recommendationByRecommender().size()));
+    }
+    String goalName = provisionResponse.recommendationByRecommender().keySet().iterator().next();
+    int numBrokersToDrop = provisionResponse.recommendationByRecommender().values().iterator().next().numBrokers();
+    // this variable indicates the maximum number of brokers that can be safely dropped.
+    int maxAllowedNumBrokersToDrop = clusterModel.aliveBrokers().size() - clusterModel.maxReplicationFactor();
+    if (numBrokersToDrop <= maxAllowedNumBrokersToDrop) {
+      // return provision response as it is if the recommended number of brokers to drop is smaller or equal to the max allowed number of
+      // brokers that can be safely dropped
+      return provisionResponse;
+    } else if (maxAllowedNumBrokersToDrop > 0) {
+      // change the recommended number of brokers to drop if the original recommendation can not be safely satisfied
+      ProvisionRecommendation recommendation =
+          new ProvisionRecommendation.Builder(ProvisionStatus.OVER_PROVISIONED).numBrokers(maxAllowedNumBrokersToDrop).build();
+      return new ProvisionResponse(ProvisionStatus.OVER_PROVISIONED, recommendation, goalName);
+    } else {
+      // change provision response status to RIGHT_SIZED if none of the brokers can be safely dropped
+      return new ProvisionResponse(ProvisionStatus.RIGHT_SIZED);
+    }
   }
 }

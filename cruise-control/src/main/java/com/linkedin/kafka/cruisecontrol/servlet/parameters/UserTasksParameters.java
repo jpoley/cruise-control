@@ -20,6 +20,7 @@ import static com.linkedin.kafka.cruisecontrol.servlet.parameters.ParameterUtils
 import static com.linkedin.kafka.cruisecontrol.servlet.parameters.ParameterUtils.ENDPOINTS_PARAM;
 import static com.linkedin.kafka.cruisecontrol.servlet.parameters.ParameterUtils.TYPES_PARAM;
 import static com.linkedin.kafka.cruisecontrol.servlet.parameters.ParameterUtils.FETCH_COMPLETED_TASK_PARAM;
+import static com.linkedin.kafka.cruisecontrol.servlet.parameters.ParameterUtils.REASON_PARAM;
 
 
 /**
@@ -29,7 +30,7 @@ import static com.linkedin.kafka.cruisecontrol.servlet.parameters.ParameterUtils
  * Retrieve the recent user tasks.
  *    GET /kafkacruisecontrol/user_tasks?json=[true/false]&amp;user_task_ids=[Set-of-USER-TASK-IDS]&amp;client_ids=[Set-of-ClientIdentity]&amp;
  *    endpoints=[Set-of-{@link CruiseControlEndPoint}]&amp;types=[Set-of-{@link UserTaskManager.TaskState}]&amp;entries=[POSITIVE-INTEGER]
- *    &amp;fetch_completed_task=[true/false]&amp;get_response_schema=[true/false]
+ *    &amp;fetch_completed_task=[true/false]&amp;get_response_schema=[true/false]&amp;doAs=[user]&amp;reason=[reason-for-request]
  * </pre>
  */
 public class UserTasksParameters extends AbstractParameters {
@@ -42,6 +43,7 @@ public class UserTasksParameters extends AbstractParameters {
     validParameterNames.add(TYPES_PARAM);
     validParameterNames.add(ENTRIES_PARAM);
     validParameterNames.add(FETCH_COMPLETED_TASK_PARAM);
+    validParameterNames.add(REASON_PARAM);
     validParameterNames.addAll(AbstractParameters.CASE_INSENSITIVE_PARAMETER_NAMES);
     CASE_INSENSITIVE_PARAMETER_NAMES = Collections.unmodifiableSortedSet(validParameterNames);
   }
@@ -59,28 +61,28 @@ public class UserTasksParameters extends AbstractParameters {
   @Override
   protected void initParameters() throws UnsupportedEncodingException {
     super.initParameters();
-    _userTaskIds = ParameterUtils.userTaskIds(_request);
-    _clientIds = ParameterUtils.clientIds(_request);
-    _endPoints = ParameterUtils.endPoints(_request);
-    _types = ParameterUtils.types(_request);
-    _entries = ParameterUtils.entries(_request);
-    _fetchCompletedTask = ParameterUtils.fetchCompletedTask(_request);
+    _userTaskIds = ParameterUtils.userTaskIds(_requestContext);
+    _clientIds = ParameterUtils.clientIds(_requestContext);
+    _endPoints = ParameterUtils.endPoints(_requestContext);
+    _types = ParameterUtils.types(_requestContext);
+    _entries = ParameterUtils.entries(_requestContext);
+    _fetchCompletedTask = ParameterUtils.fetchCompletedTask(_requestContext);
   }
 
   public Set<UUID> userTaskIds() {
-    return _userTaskIds;
+    return Collections.unmodifiableSet(_userTaskIds);
   }
 
   public Set<String> clientIds() {
-    return _clientIds;
+    return Collections.unmodifiableSet(_clientIds);
   }
 
   public Set<CruiseControlEndPoint> endPoints() {
-    return _endPoints;
+    return Collections.unmodifiableSet(_endPoints);
   }
 
   public Set<UserTaskManager.TaskState> types() {
-    return _types;
+    return Collections.unmodifiableSet(_types);
   }
 
   public int entries() {

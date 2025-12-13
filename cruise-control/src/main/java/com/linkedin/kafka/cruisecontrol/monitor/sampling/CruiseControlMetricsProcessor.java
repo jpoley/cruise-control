@@ -6,6 +6,7 @@ package com.linkedin.kafka.cruisecontrol.monitor.sampling;
 
 import com.linkedin.kafka.cruisecontrol.config.BrokerCapacityConfigResolver;
 import com.linkedin.kafka.cruisecontrol.config.BrokerCapacityInfo;
+import com.linkedin.kafka.cruisecontrol.exception.BrokerCapacityResolutionException;
 import com.linkedin.kafka.cruisecontrol.metricsreporter.exception.UnknownVersionException;
 import com.linkedin.kafka.cruisecontrol.metricsreporter.metric.CruiseControlMetric;
 import com.linkedin.kafka.cruisecontrol.monitor.sampling.holder.BrokerLoad;
@@ -15,6 +16,7 @@ import java.util.HashMap;
 import java.util.HashSet;
 import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.TimeoutException;
 import org.apache.kafka.common.Cluster;
 import org.apache.kafka.common.Node;
 import org.apache.kafka.common.TopicPartition;
@@ -22,6 +24,7 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import static com.linkedin.kafka.cruisecontrol.monitor.MonitorUtils.getRackHandleNull;
+import static com.linkedin.kafka.cruisecontrol.monitor.MonitorUtils.BROKER_CAPACITY_FETCH_TIMEOUT_MS;
 import static com.linkedin.kafka.cruisecontrol.monitor.sampling.SamplingUtils.UNRECOGNIZED_BROKER_ID;
 import static com.linkedin.kafka.cruisecontrol.monitor.sampling.SamplingUtils.buildBrokerMetricSample;
 import static com.linkedin.kafka.cruisecontrol.monitor.sampling.SamplingUtils.buildPartitionMetricSample;
@@ -35,14 +38,14 @@ public class CruiseControlMetricsProcessor {
   private static final long INIT_METRIC_TIMESTAMP = -1L;
   private final Map<Integer, BrokerLoad> _brokerLoad;
   // TODO: Use the cached number of cores in estimation of partition CPU utilization.
-  private final Map<Integer, Short> _cachedNumCoresByBroker;
+  private final Map<Integer, Double> _cachedNumCoresByBroker;
   private final BrokerCapacityConfigResolver _brokerCapacityConfigResolver;
   private final boolean _allowCpuCapacityEstimation;
   private long _maxMetricTimestamp;
 
   /**
    * @param brokerCapacityConfigResolver The resolver for retrieving broker capacities.
-   * @param allowCpuCapacityEstimation True to allow CPU capacity estimation of brokers used for CPU utilization estimation.
+   * @param allowCpuCapacityEstimation {@code true} to allow CPU capacity estimation of brokers used for CPU utilization estimation.
    */
   CruiseControlMetricsProcessor(BrokerCapacityConfigResolver brokerCapacityConfigResolver, boolean allowCpuCapacityEstimation) {
     _brokerLoad = new HashMap<>();
@@ -65,6 +68,8 @@ public class CruiseControlMetricsProcessor {
 
   /**
    * Update the cached number of cores by broker id. The cache is refreshed only for brokers with missing number of cores.
+   * Note that if the broker capacity resolver is unable to resolve or can only estimate certain broker's capacity, the core
+   * number for that broker will not be updated.
    * @param cluster Kafka cluster.
    */
   private void updateCachedNumCoresByBroker(Cluster cluster) {
@@ -76,17 +81,24 @@ public class CruiseControlMetricsProcessor {
           LOG.warn("Received metrics from unrecognized broker {}.", bid);
           return null;
         }
-        BrokerCapacityInfo capacity = _brokerCapacityConfigResolver.capacityForBroker(getRackHandleNull(node), node.host(), bid);
-        // No mapping shall be recorded if capacity is estimated, but estimation is not allowed.
-        return (!_allowCpuCapacityEstimation && capacity.isEstimated()) ? null : capacity.numCpuCores();
+        try {
+          BrokerCapacityInfo capacity =
+              _brokerCapacityConfigResolver.capacityForBroker(getRackHandleNull(node), node.host(), bid, BROKER_CAPACITY_FETCH_TIMEOUT_MS,
+                                                              _allowCpuCapacityEstimation);
+          return capacity == null ? null : capacity.numCpuCores();
+        } catch (TimeoutException | BrokerCapacityResolutionException e) {
+          LOG.warn("Unable to get number of CPU cores for broker {}.", node.id(), e);
+          return null;
+        }
       });
     }
   }
 
   /**
    * Package private for unit tests.
+   * @return The cached number of cores by broker.
    */
-  Map<Integer, Short> cachedNumCoresByBroker() {
+  Map<Integer, Double> cachedNumCoresByBroker() {
     return _cachedNumCoresByBroker;
   }
 
@@ -112,22 +124,55 @@ public class CruiseControlMetricsProcessor {
     // Get partition metric samples.
     Map<Integer, Integer> skippedPartitionByBroker = null;
     Set<PartitionMetricSample> partitionMetricSamples = new HashSet<>();
-    if (samplingMode == MetricSampler.SamplingMode.ALL || samplingMode == MetricSampler.SamplingMode.PARTITION_METRICS_ONLY) {
+    if (samplingMode != MetricSampler.SamplingMode.BROKER_METRICS_ONLY) {
       skippedPartitionByBroker = addPartitionMetricSamples(cluster, partitionsDotNotHandled, partitionMetricSamples);
     }
 
     // Get broker metric samples.
     int skippedBroker = 0;
     Set<BrokerMetricSample> brokerMetricSamples = new HashSet<>();
-    if (samplingMode == MetricSampler.SamplingMode.ALL || samplingMode == MetricSampler.SamplingMode.BROKER_METRICS_ONLY) {
+    if (samplingMode != MetricSampler.SamplingMode.PARTITION_METRICS_ONLY) {
       skippedBroker = addBrokerMetricSamples(cluster, brokerMetricSamples);
     }
 
-    LOG.info("Generated {}{} partition metric samples and {}{} broker metric samples for timestamp {}.",
-             partitionMetricSamples.size(), (skippedPartitionByBroker != null && !skippedPartitionByBroker.isEmpty()) ?
-             String.format("(%s skipped by broker %s)", skippedPartitionByBroker.values().stream().mapToInt(v -> v).sum(), skippedPartitionByBroker) : "",
-             brokerMetricSamples.size(), skippedBroker > 0 ? "(" + skippedBroker + " skipped)" : "", _maxMetricTimestamp);
+    logProcess(samplingMode, skippedPartitionByBroker, skippedBroker, partitionMetricSamples, brokerMetricSamples);
     return new MetricSampler.Samples(partitionMetricSamples, brokerMetricSamples);
+  }
+
+  private void logProcess(MetricSampler.SamplingMode samplingMode,
+                          Map<Integer, Integer> skippedPartitionByBroker,
+                          int skippedBroker,
+                          Set<PartitionMetricSample> partitionMetricSamples,
+                          Set<BrokerMetricSample> brokerMetricSamples) {
+    switch (samplingMode) {
+      case ONGOING_EXECUTION:
+      case ALL:
+        LOG.info("Generated {}{} partition metric samples and {}{} broker metric samples for timestamp {}.",
+                 partitionMetricSamples.size(),
+                 !skippedPartitionByBroker.isEmpty() ? String.format("(%d skipped by broker %s)",
+                                                                     skippedPartitionByBroker.values()
+                                                                                             .stream()
+                                                                                             .mapToInt(v -> v)
+                                                                                             .sum(),
+                                                                     skippedPartitionByBroker) : "",
+                 brokerMetricSamples.size(), skippedBroker > 0 ? "(" + skippedBroker + " skipped)" : "", _maxMetricTimestamp);
+        break;
+      case PARTITION_METRICS_ONLY:
+        LOG.info("Generated {}{} partition metric samples for timestamp {}.", partitionMetricSamples.size(),
+                 !skippedPartitionByBroker.isEmpty() ? String.format("(%d skipped by broker %s)",
+                                                                     skippedPartitionByBroker.values()
+                                                                                             .stream()
+                                                                                             .mapToInt(v -> v)
+                                                                                             .sum(),
+                                                                     skippedPartitionByBroker) : "", _maxMetricTimestamp);
+        break;
+      case BROKER_METRICS_ONLY:
+        LOG.info("Generated {}{} broker metric samples for timestamp {}.", brokerMetricSamples.size(),
+                 skippedBroker > 0 ? "(" + skippedBroker + " skipped)" : "", _maxMetricTimestamp);
+        break;
+      default:
+        throw new IllegalStateException("Unknown sampling mode " + samplingMode);
+    }
   }
 
   void clear() {

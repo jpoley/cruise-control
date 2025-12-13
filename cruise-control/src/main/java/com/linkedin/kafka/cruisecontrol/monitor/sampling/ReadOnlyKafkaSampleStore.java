@@ -9,6 +9,9 @@ import java.util.ArrayList;
 import java.util.Map;
 import java.util.concurrent.Executors;
 
+import static com.linkedin.kafka.cruisecontrol.monitor.sampling.SamplingUtils.LOADING_PROGRESS;
+import static com.linkedin.kafka.cruisecontrol.monitor.sampling.SamplingUtils.createSampleStoreConsumer;
+
 
 /**
  * This samples store only reads the partition metric samples and broker metric samples from the Kafka topic.
@@ -16,25 +19,25 @@ import java.util.concurrent.Executors;
  */
 public class ReadOnlyKafkaSampleStore extends KafkaSampleStore {
   /**
-   * We have to override the configure method so that no producer is created and no ZK topic configuration change
+   * We have to override the configure method so that no producer is created and no topic configuration change
    * is made either.
    */
   @Override
   public void configure(Map<String, ?> config) {
     _partitionMetricSampleStoreTopic = KafkaCruiseControlUtils.getRequiredConfig(config, PARTITION_METRIC_SAMPLE_STORE_TOPIC_CONFIG);
     _brokerMetricSampleStoreTopic = KafkaCruiseControlUtils.getRequiredConfig(config, BROKER_METRIC_SAMPLE_STORE_TOPIC_CONFIG);
-    String metricSampleStoreTopicReplicationFactorString = (String) config.get(SAMPLE_STORE_TOPIC_REPLICATION_FACTOR_CONFIG);
-    _sampleStoreTopicReplicationFactor = metricSampleStoreTopicReplicationFactorString == null || metricSampleStoreTopicReplicationFactorString.isEmpty()
-        ? null : Integer.parseInt(metricSampleStoreTopicReplicationFactorString);
+    String sampleStoreTopicReplicationFactorString = (String) config.get(SAMPLE_STORE_TOPIC_REPLICATION_FACTOR_CONFIG);
+    _sampleStoreTopicReplicationFactor = sampleStoreTopicReplicationFactorString == null || sampleStoreTopicReplicationFactorString.isEmpty()
+        ? null : Short.parseShort(sampleStoreTopicReplicationFactorString);
     String numProcessingThreadsString = (String) config.get(NUM_SAMPLE_LOADING_THREADS_CONFIG);
     int numProcessingThreads = numProcessingThreadsString == null || numProcessingThreadsString.isEmpty()
         ? DEFAULT_NUM_SAMPLE_LOADING_THREADS : Integer.parseInt(numProcessingThreadsString);
     _metricProcessorExecutor = Executors.newFixedThreadPool(numProcessingThreads);
     _consumers = new ArrayList<>(numProcessingThreads);
     for (int i = 0; i < numProcessingThreads; i++) {
-      _consumers.add(createConsumer(config));
+      _consumers.add(createSampleStoreConsumer(config, CONSUMER_CLIENT_ID_PREFIX));
     }
-    _loadingProgress = -1.0;
+    _loadingProgress = LOADING_PROGRESS;
   }
 
   @Override
@@ -44,11 +47,6 @@ public class ReadOnlyKafkaSampleStore extends KafkaSampleStore {
 
   @Override
   public void storeSamples(MetricSampler.Samples samples) {
-    // Do nothing.
-  }
-
-  @Override
-  public void evictSamplesBefore(long timestamp) {
     // Do nothing.
   }
 }

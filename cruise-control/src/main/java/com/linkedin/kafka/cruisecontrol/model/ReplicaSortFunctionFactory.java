@@ -8,7 +8,6 @@ package com.linkedin.kafka.cruisecontrol.model;
 import com.linkedin.cruisecontrol.monitor.sampling.aggregator.MetricValues;
 import com.linkedin.kafka.cruisecontrol.common.Resource;
 import com.linkedin.kafka.cruisecontrol.monitor.metricdefinition.KafkaMetricDef;
-
 import java.util.Set;
 import java.util.function.Function;
 
@@ -16,11 +15,7 @@ import java.util.function.Function;
  * A factory class of replica sort functions. It is always preferred to use the functions in this factory instead
  * of writing ad-hoc functions.
  */
-public class ReplicaSortFunctionFactory {
-
-  private ReplicaSortFunctionFactory() {
-
-  }
+public final class ReplicaSortFunctionFactory {
   // Priority functions
   /** Prioritize the immigrant replicas */
   private static final Function<Replica, Integer> PRIORITIZE_IMMIGRANTS = r -> r.originalBroker() != r.broker() ? 0 : 1;
@@ -41,7 +36,11 @@ public class ReplicaSortFunctionFactory {
   /** Select immigrants only */
   private static final Function<Replica, Boolean> SELECT_IMMIGRANTS = r -> r.originalBroker() != r.broker();
   /** Select immigrant or offline replicas only */
-  private static final Function<Replica, Boolean> SELECT_IMMIGRANT_OR_OFFLINE_REPLICAS = r -> r.originalBroker() != r.broker() || r.isCurrentOffline();
+  private static final Function<Replica, Boolean> SELECT_IMMIGRANT_OR_OFFLINE_REPLICAS = r -> r.originalBroker() != r.broker()
+                                                                                              || r.isCurrentOffline();
+
+  private ReplicaSortFunctionFactory() {
+  }
 
   // Score functions
   /**
@@ -144,6 +143,15 @@ public class ReplicaSortFunctionFactory {
    */
   public static Function<Replica, Boolean> selectReplicasBasedOnExcludedTopics(Set<String> excludedTopics) {
     return r -> r.isOriginalOffline() || !excludedTopics.contains(r.topicPartition().topic());
+  }
+
+  /**
+   * @param includedTopics Topics included for partition movements.
+   *
+   * @return A selection function that filters out replicas which are not from topics which should be included.
+   */
+  public static Function<Replica, Boolean> selectReplicasBasedOnIncludedTopics(Set<String> includedTopics) {
+    return r -> includedTopics.contains(r.topicPartition().topic());
   }
 
   /**

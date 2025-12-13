@@ -4,17 +4,24 @@
 
 package com.linkedin.kafka.cruisecontrol.analyzer.kafkaassigner;
 
-import com.linkedin.kafka.cruisecontrol.analyzer.OptimizationOptions;
-import com.linkedin.kafka.cruisecontrol.analyzer.goals.internals.BrokerAndSortedReplicas;
+import com.google.common.annotations.VisibleForTesting;
 import com.linkedin.kafka.cruisecontrol.analyzer.ActionAcceptance;
-import com.linkedin.kafka.cruisecontrol.analyzer.BalancingConstraint;
 import com.linkedin.kafka.cruisecontrol.analyzer.BalancingAction;
+import com.linkedin.kafka.cruisecontrol.analyzer.BalancingConstraint;
+import com.linkedin.kafka.cruisecontrol.analyzer.OptimizationOptions;
+import com.linkedin.kafka.cruisecontrol.analyzer.ProvisionResponse;
+import com.linkedin.kafka.cruisecontrol.analyzer.ProvisionStatus;
 import com.linkedin.kafka.cruisecontrol.analyzer.goals.Goal;
+import com.linkedin.kafka.cruisecontrol.analyzer.goals.GoalUtils;
+import com.linkedin.kafka.cruisecontrol.analyzer.goals.internals.BrokerAndSortedReplicas;
+import com.linkedin.kafka.cruisecontrol.analyzer.goals.rackaware.NoOpRackAwareGoalRackIdMapper;
+import com.linkedin.kafka.cruisecontrol.analyzer.goals.rackaware.RackAwareGoalRackIdMapper;
 import com.linkedin.kafka.cruisecontrol.config.KafkaCruiseControlConfig;
 import com.linkedin.kafka.cruisecontrol.config.constants.MonitorConfig;
 import com.linkedin.kafka.cruisecontrol.model.Broker;
 import com.linkedin.kafka.cruisecontrol.model.ClusterModel;
 import com.linkedin.kafka.cruisecontrol.model.ClusterModelStats;
+import com.linkedin.kafka.cruisecontrol.model.Rack;
 import com.linkedin.kafka.cruisecontrol.model.Replica;
 import com.linkedin.kafka.cruisecontrol.monitor.ModelCompletenessRequirements;
 import java.util.ArrayList;
@@ -36,8 +43,8 @@ import org.apache.kafka.common.TopicPartition;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import static com.linkedin.kafka.cruisecontrol.common.Resource.DISK;
 import static com.linkedin.kafka.cruisecontrol.analyzer.goals.GoalUtils.MIN_NUM_VALID_WINDOWS_FOR_SELF_HEALING;
+import static com.linkedin.kafka.cruisecontrol.common.Resource.DISK;
 
 
 /**
@@ -50,11 +57,16 @@ public class KafkaAssignerDiskUsageDistributionGoal implements Goal {
   private static final double USAGE_EQUALITY_DELTA = 0.0001;
   // Ensure that each convergence step due to replica swap is over REPLICA_CONVERGENCE_DELTA.
   private static final double REPLICA_CONVERGENCE_DELTA = 0.4;
+  private static final RackAwareGoalRackIdMapper DEFAULT_RACK_ID_MAPPER = new NoOpRackAwareGoalRackIdMapper();
+  private final ProvisionResponse _provisionResponse;
   private BalancingConstraint _balancingConstraint;
   private double _minMonitoredPartitionPercentage = 0.995;
 
-  public KafkaAssignerDiskUsageDistributionGoal() {
+  @VisibleForTesting
+  RackAwareGoalRackIdMapper _rackIdMapper = DEFAULT_RACK_ID_MAPPER;
 
+  public KafkaAssignerDiskUsageDistributionGoal() {
+    _provisionResponse = new ProvisionResponse(ProvisionStatus.UNDECIDED);
   }
 
   /**
@@ -62,7 +74,16 @@ public class KafkaAssignerDiskUsageDistributionGoal implements Goal {
    * @param constraint the balancing constraint.
    */
   KafkaAssignerDiskUsageDistributionGoal(BalancingConstraint constraint) {
+    this();
     _balancingConstraint = constraint;
+  }
+
+  private String mappedRackIdOf(Broker broker) {
+    return mappedRackIdOf(broker.rack());
+  }
+
+  private String mappedRackIdOf(Rack rack) {
+    return _rackIdMapper.apply(rack.id());
   }
 
   @Override
@@ -72,9 +93,10 @@ public class KafkaAssignerDiskUsageDistributionGoal implements Goal {
 
   @Override
   public void configure(Map<String, ?> configs) {
-    KafkaCruiseControlConfig parsedConfig = new KafkaCruiseControlConfig(configs, false);
+    KafkaCruiseControlConfig parsedConfig = new KafkaCruiseControlConfig(configs);
     _balancingConstraint = new BalancingConstraint(parsedConfig);
     _minMonitoredPartitionPercentage = parsedConfig.getDouble(MonitorConfig.MIN_VALID_PARTITION_RATIO_CONFIG);
+    _rackIdMapper = GoalUtils.getRackAwareGoalRackIdMapper(configs);
   }
 
   @Override
@@ -129,7 +151,7 @@ public class KafkaAssignerDiskUsageDistributionGoal implements Goal {
    * @param upperThreshold the upper threshold of the disk usage.
    * @param lowerThreshold the lower threshold of the disk usage.
    *
-   * @return True if all the brokers are within thresholds, false otherwise.
+   * @return {@code true} if all the brokers are within thresholds, {@code false} otherwise.
    */
   private boolean isOptimized(ClusterModel clusterModel, double upperThreshold, double lowerThreshold) {
     // Check if any broker is out of the allowed usage range.
@@ -147,13 +169,13 @@ public class KafkaAssignerDiskUsageDistributionGoal implements Goal {
       StringJoiner joiner = new StringJoiner(", ");
       brokersUnderLowerThreshold.forEach(b -> joiner.add(String.format("%d:(%.3f)", b.id(), diskUsage(b))));
       LOG.warn("There are still {} brokers under the lower threshold of {}. The brokers are {}",
-               brokersUnderLowerThreshold.size(), dWrap(lowerThreshold), joiner.toString());
+               brokersUnderLowerThreshold.size(), dWrap(lowerThreshold), joiner);
     }
     if (!brokersAboveUpperThreshold.isEmpty()) {
       StringJoiner joiner = new StringJoiner(", ");
       brokersAboveUpperThreshold.forEach(b -> joiner.add(String.format("%d:(%.3f)", b.id(), diskUsage(b))));
       LOG.warn("There are still {} brokers above the upper threshold of {}. The brokers are {}",
-               brokersAboveUpperThreshold.size(), dWrap(upperThreshold), joiner.toString());
+               brokersAboveUpperThreshold.size(), dWrap(upperThreshold), joiner);
     }
     return brokersUnderLowerThreshold.isEmpty() && brokersAboveUpperThreshold.isEmpty();
   }
@@ -169,7 +191,7 @@ public class KafkaAssignerDiskUsageDistributionGoal implements Goal {
    * @param upperThreshold the upper limit of the disk usage for a broker
    * @param excludedTopics the topics to exclude from movement.
    *
-   * @return True if an action has been taken to improve the disk usage of the broker, false when a broker cannot or
+   * @return {@code true} if an action has been taken to improve the disk usage of the broker, {@code false} when a broker cannot or
    * does not need to be improved further.
    */
   private boolean checkAndOptimize(SortedSet<BrokerAndSortedReplicas> allBrokers,
@@ -233,15 +255,15 @@ public class KafkaAssignerDiskUsageDistributionGoal implements Goal {
    * Swap replica between two brokers. The method should achieve the result that the overall usage of the two
    * brokers are improved. More specifically, the following result is reduced.
    * <pre>
-   * (<tt>UsageOfBroker1</tt> - <tt>MeanUsage</tt>) + (<tt>UsageOfBroker2</tt> - <tt>MeanUsage</tt>)
+   * ({@code UsageOfBroker1} - {@code MeanUsage}) + ({@code UsageOfBroker2} - {@code MeanUsage})
    * </pre>
    *
    * @param toSwap the broker that needs to swap a replica with the other broker.
-   * @param toSwapWith the broker that provides a replica to swap with the broker <tt>toSwap</tt>
+   * @param toSwapWith the broker that provides a replica to swap with the broker {@code toSwap}
    * @param meanDiskUsage the average usage of the cluster.
    * @param clusterModel the cluster model.
    * @param excludedTopics the topics to exclude from swapping.
-   * @return True if a swap has been done, false otherwise.
+   * @return {@code true} if a swap has been done, {@code false} otherwise.
    */
   boolean swapReplicas(BrokerAndSortedReplicas toSwap,
                        BrokerAndSortedReplicas toSwapWith,
@@ -338,8 +360,8 @@ public class KafkaAssignerDiskUsageDistributionGoal implements Goal {
         LOG.trace("replicaToSwap: {}(size={}), targetSize={}, minSize={}, maxSize={}",
                   replicaToSwap, dWrap(replicaSize(replicaToSwap)), dWrap(targetSize), dWrap(minSize), dWrap(maxSize));
       }
-      Replica replicaToSwapWith = sortedReplicasToSwapWith.isEmpty() ? null :
-                                  findReplicaToSwapWith(replicaToSwap, sortedReplicasToSwapWith, targetSize, minSize, maxSize, clusterModel);
+      Replica replicaToSwapWith = sortedReplicasToSwapWith.isEmpty() ? null : findReplicaToSwapWith(replicaToSwap, sortedReplicasToSwapWith,
+                                                                                                    targetSize, minSize, maxSize, clusterModel);
       if (replicaToSwapWith != null) {
         if (LOG.isDebugEnabled()) {
           LOG.debug("Found replica to swap. Swapping {}({}) on broker {}({}) and {}({}) on broker {}({})",
@@ -454,13 +476,16 @@ public class KafkaAssignerDiskUsageDistributionGoal implements Goal {
    * @param destinationBroker the broker to move the replica to.
    * @param clusterModel the cluster model.
    *
-   * @return True if it is possible to move the replica to the broker, false otherwise.
+   * @return {@code true} if it is possible to move the replica to the broker, {@code false} otherwise.
    */
   private boolean possibleToMove(Replica replica, Broker destinationBroker, ClusterModel clusterModel) {
     TopicPartition tp = replica.topicPartition();
 
-    boolean case1 = !clusterModel.partition(tp).partitionRacks().contains(destinationBroker.rack());
-    boolean case2 = replica.broker().rack() == destinationBroker.rack() && destinationBroker.replica(tp) == null;
+    boolean case1 = clusterModel.partition(tp).partitionRacks().stream()
+                                .map(this::mappedRackIdOf)
+                                .noneMatch(mappedRackIdOf(destinationBroker)::equals);
+    boolean case2 = Objects.equals(mappedRackIdOf(replica.broker()), mappedRackIdOf(destinationBroker))
+                    && destinationBroker.replica(tp) == null;
 
     return case1 || case2;
   }
@@ -474,12 +499,20 @@ public class KafkaAssignerDiskUsageDistributionGoal implements Goal {
    * @param r1 the first replica to swap
    * @param r2 the second replica to swap with the first replica
    * @param clusterModel the cluster model
-   * @return True if the two replicas can be swapped, false otherwise.
+   * @return {@code true} if the two replicas can be swapped, {@code false} otherwise.
    */
   boolean canSwap(Replica r1, Replica r2, ClusterModel clusterModel) {
-    boolean inSameRack = r1.broker().rack() == r2.broker().rack() && r1.broker() != r2.broker();
-    boolean rackAware = !clusterModel.partition(r1.topicPartition()).partitionRacks().contains(r2.broker().rack())
-        && !clusterModel.partition(r2.topicPartition()).partitionRacks().contains(r1.broker().rack());
+    String mappedRackIdOfR1 = mappedRackIdOf(r1.broker());
+    String mappedRackIdOfR2 = mappedRackIdOf(r2.broker());
+    boolean inSameRack = r1.broker() != r2.broker() && mappedRackIdOfR1.equals(mappedRackIdOfR2);
+    boolean rackAware =
+        clusterModel.partition(r1.topicPartition()).partitionRacks().stream()
+                    .map(this::mappedRackIdOf)
+                    .noneMatch(mappedRackIdOfR2::equals)
+        && clusterModel.partition(r2.topicPartition()).partitionRacks().stream()
+                       .map(this::mappedRackIdOf)
+                       .noneMatch(mappedRackIdOfR1::equals);
+
     boolean sameRole = r1.isLeader() == r2.isLeader();
     return (inSameRack || rackAware) && sameRole;
   }
@@ -522,6 +555,17 @@ public class KafkaAssignerDiskUsageDistributionGoal implements Goal {
   @Override
   public boolean isHardGoal() {
     return true;
+  }
+
+  @Override
+  public ProvisionStatus provisionStatus() {
+    // Provision status computation is not supported for kafka_assigner goals.
+    return provisionResponse().status();
+  }
+
+  @Override
+  public ProvisionResponse provisionResponse() {
+    return _provisionResponse;
   }
 
   private double diskUsage(BrokerAndSortedReplicas bas) {
@@ -663,8 +707,8 @@ public class KafkaAssignerDiskUsageDistributionGoal implements Goal {
   }
 
   // Thin wrapper around double for printing purpose.
-  private static class DoubleWrapper {
-    final double _value;
+  private static final class DoubleWrapper {
+    private final double _value;
 
     private DoubleWrapper(double value) {
       _value = value;

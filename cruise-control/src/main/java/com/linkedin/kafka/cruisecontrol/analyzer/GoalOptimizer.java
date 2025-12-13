@@ -4,9 +4,12 @@
 
 package com.linkedin.kafka.cruisecontrol.analyzer;
 
+import com.codahale.metrics.Gauge;
 import com.codahale.metrics.MetricRegistry;
 import com.codahale.metrics.Timer;
+import com.linkedin.kafka.cruisecontrol.common.Utils;
 import com.linkedin.kafka.cruisecontrol.analyzer.goals.Goal;
+import com.linkedin.kafka.cruisecontrol.config.BrokerSetResolver;
 import com.linkedin.kafka.cruisecontrol.config.KafkaCruiseControlConfig;
 import com.linkedin.kafka.cruisecontrol.common.KafkaCruiseControlThreadFactory;
 import com.linkedin.kafka.cruisecontrol.config.constants.AnalyzerConfig;
@@ -24,7 +27,8 @@ import com.linkedin.kafka.cruisecontrol.monitor.ModelCompletenessRequirements;
 import com.linkedin.kafka.cruisecontrol.monitor.MonitorUtils;
 import com.linkedin.kafka.cruisecontrol.monitor.task.LoadMonitorTaskRunner;
 import com.linkedin.kafka.cruisecontrol.servlet.response.stats.BrokerStats;
-import java.util.Collections;
+import java.time.Duration;
+import java.util.HashMap;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -39,17 +43,20 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.concurrent.locks.ReentrantLock;
 import java.util.regex.Pattern;
-import java.util.stream.Collectors;
+import org.apache.kafka.clients.admin.AdminClient;
 import org.apache.kafka.common.Cluster;
 import org.apache.kafka.common.TopicPartition;
 import org.apache.kafka.common.utils.Time;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import static com.linkedin.kafka.cruisecontrol.KafkaCruiseControlUtils.ADMIN_CLIENT_CONFIG;
 import static com.linkedin.kafka.cruisecontrol.KafkaCruiseControlUtils.balancednessCostByGoal;
-import static com.linkedin.kafka.cruisecontrol.KafkaCruiseControlUtils.sanityCheckCapacityEstimation;
+import static com.linkedin.kafka.cruisecontrol.KafkaCruiseControlUtils.GOAL_OPTIMIZER_SENSOR;
 import static com.linkedin.kafka.cruisecontrol.monitor.task.LoadMonitorTaskRunner.LoadMonitorTaskRunnerState.BOOTSTRAPPING;
 import static com.linkedin.kafka.cruisecontrol.monitor.task.LoadMonitorTaskRunner.LoadMonitorTaskRunnerState.LOADING;
+import static com.linkedin.kafka.cruisecontrol.servlet.KafkaCruiseControlServletUtils.KAFKA_CRUISE_CONTROL_CONFIG_OBJECT_CONFIG;
+import static com.linkedin.cruisecontrol.common.utils.Utils.validateNotNull;
 
 
 /**
@@ -57,6 +64,7 @@ import static com.linkedin.kafka.cruisecontrol.monitor.task.LoadMonitorTaskRunne
  */
 public class GoalOptimizer implements Runnable {
   private static final Logger LOG = LoggerFactory.getLogger(GoalOptimizer.class);
+  private static final long HALF_MINUTE_IN_MS = TimeUnit.SECONDS.toMillis(30);
   private final List<Goal> _goalsByPriority;
   private final BalancingConstraint _balancingConstraint;
   private final Pattern _defaultExcludedTopics;
@@ -80,6 +88,8 @@ public class GoalOptimizer implements Runnable {
   private volatile boolean _hasOngoingExplicitPrecomputation;
   private final double _priorityWeight;
   private final double _strictnessWeight;
+  private final OptimizationOptionsGenerator _optimizationOptionsGenerator;
+  private volatile boolean _hasUnfixableProposalOptimization;
 
   /**
    * Constructor for Goal Optimizer takes the goals as input. The order of the list determines the priority of goals
@@ -91,8 +101,9 @@ public class GoalOptimizer implements Runnable {
                        LoadMonitor loadMonitor,
                        Time time,
                        MetricRegistry dropwizardMetricRegistry,
-                       Executor executor) {
-    _goalsByPriority = AnalyzerUtils.getGoalsByPriority(config);
+                       Executor executor,
+                       AdminClient adminClient) {
+    _goalsByPriority = AnalyzerUtils.getDefaultGoalsByPriority(config);
     _defaultModelCompletenessRequirements = MonitorUtils.combineLoadRequirementOptions(_goalsByPriority);
     _requirementsWithAvailableValidWindows = new ModelCompletenessRequirements(
         1,
@@ -114,12 +125,28 @@ public class GoalOptimizer implements Runnable {
     // A new AtomicReference with null initial value.
     _proposalGenerationException = new AtomicReference<>();
     _proposalPrecomputingProgress = new OperationProgress();
-    _proposalComputationTimer = dropwizardMetricRegistry.timer(MetricRegistry.name("GoalOptimizer", "proposal-computation-timer"));
+    _proposalComputationTimer = dropwizardMetricRegistry.timer(MetricRegistry.name(GOAL_OPTIMIZER_SENSOR, "proposal-computation-timer"));
+
+    // The cluster is identified as unfixable if combined goals can not be fixed
+    dropwizardMetricRegistry.register(MetricRegistry.name(GOAL_OPTIMIZER_SENSOR, "has-unfixable-proposal-optimization"),
+                                      (Gauge<Integer>) () -> hasUnfixableProposalOptimization() ? 1 : 0);
+    _hasUnfixableProposalOptimization = false;
     _executor = executor;
     _hasOngoingExplicitPrecomputation = false;
     _priorityWeight = config.getDouble(AnalyzerConfig.GOAL_BALANCEDNESS_PRIORITY_WEIGHT_CONFIG);
     _strictnessWeight = config.getDouble(AnalyzerConfig.GOAL_BALANCEDNESS_STRICTNESS_WEIGHT_CONFIG);
     _allowCapacityEstimationOnProposalPrecompute = config.getBoolean(AnalyzerConfig.ALLOW_CAPACITY_ESTIMATION_ON_PROPOSAL_PRECOMPUTE_CONFIG);
+    Map<String, Object> overrideConfigs = Map.of(KAFKA_CRUISE_CONTROL_CONFIG_OBJECT_CONFIG, config, ADMIN_CLIENT_CONFIG, adminClient);
+    _optimizationOptionsGenerator = config.getConfiguredInstance(AnalyzerConfig.OPTIMIZATION_OPTIONS_GENERATOR_CLASS_CONFIG,
+                                                                 OptimizationOptionsGenerator.class,
+                                                                 overrideConfigs);
+  }
+
+  /**
+   * @return true if we have unfixable proposal optimization
+   */
+  private boolean hasUnfixableProposalOptimization() {
+    return _hasUnfixableProposalOptimization;
   }
 
   @Override
@@ -129,15 +156,15 @@ public class GoalOptimizer implements Runnable {
     LOG.info("Starting proposal candidate computation.");
     while (!_shutdown && _numPrecomputingThreads > 0) {
       LoadMonitorTaskRunner.LoadMonitorTaskRunnerState loadMonitorTaskRunnerState = _loadMonitor.taskRunnerState();
-      long sleepTime = _proposalExpirationMs;
+      long sleepTimeMs = _proposalExpirationMs;
       if (loadMonitorTaskRunnerState == LOADING || loadMonitorTaskRunnerState == BOOTSTRAPPING) {
         LOG.info("Skipping proposal precomputing because load monitor is in " + loadMonitorTaskRunnerState + " state.");
-        // Check in 30 seconds to see if the load monitor state has changed.
-        sleepTime = 30000L;
+        // Check in {@value HALF_MINUTE_IN_MS} to see if the load monitor state has changed.
+        sleepTimeMs = HALF_MINUTE_IN_MS;
       } else if (!_loadMonitor.meetCompletenessRequirements(_requirementsWithAvailableValidWindows)) {
         LOG.info("Skipping proposal precomputing because load monitor does not have enough snapshots.");
-        // Check in 30 seconds to see if the load monitor has sufficient number of snapshots.
-        sleepTime = 30000L;
+        // Check in {@value HALF_MINUTE_IN_MS} to see if the load monitor has sufficient number of snapshots.
+        sleepTimeMs = HALF_MINUTE_IN_MS;
       } else {
         try {
           if (!validCachedProposal()) {
@@ -159,12 +186,12 @@ public class GoalOptimizer implements Runnable {
                       + "Cached generation: {}", _cachedProposals.modelGeneration());
           }
         } catch (KafkaCruiseControlException e) {
-          // Check in 30 seconds to see if the ongoing execution has finished.
-          sleepTime = 30000L;
+          // Check in {@value HALF_MINUTE_IN_MS} to see if the ongoing execution has finished.
+          sleepTimeMs = HALF_MINUTE_IN_MS;
           LOG.debug("Skipping proposal precomputing because there is an ongoing execution.", e);
         }
       }
-      long deadline = _time.milliseconds() + sleepTime;
+      long deadline = _time.milliseconds() + sleepTimeMs;
       if (!_shutdown && _time.milliseconds() < deadline) {
         try {
           Thread.sleep(deadline - _time.milliseconds());
@@ -301,7 +328,7 @@ public class GoalOptimizer implements Runnable {
             } else if (!_hasOngoingExplicitPrecomputation) {
               // Submit background computation if there is no ongoing explicit precomputation and wait for the cache update.
               _hasOngoingExplicitPrecomputation = true;
-              _proposalPrecomputingExecutor.submit(() -> computeCachedProposal(allowCapacityEstimation));
+              _proposalPrecomputingExecutor.execute(() -> computeCachedProposal(allowCapacityEstimation));
             }
             operationProgress.refer(_proposalPrecomputingProgress);
             _cacheLock.wait();
@@ -352,15 +379,18 @@ public class GoalOptimizer implements Runnable {
    * </ul>
    *
    * See {@link GoalOptimizer#optimizations(ClusterModel, List, OperationProgress, Map, OptimizationOptions)}.
+   *
+   * @param clusterModel The state of the cluster.
+   * @param goalsByPriority The goals ordered by priority.
+   * @param operationProgress To report the optimization progress.
    * @return Results of optimization containing the proposals and stats.
    */
   public OptimizerResult optimizations(ClusterModel clusterModel,
                                        List<Goal> goalsByPriority,
                                        OperationProgress operationProgress)
       throws KafkaCruiseControlException {
-    if (clusterModel == null) {
-      throw new IllegalArgumentException("The cluster model cannot be null");
-    } else if (goalsByPriority.isEmpty()) {
+    validateNotNull(clusterModel, "The cluster model cannot be null");
+    if (goalsByPriority.isEmpty()) {
       throw new IllegalArgumentException("At least one goal must be provided to get an optimization result.");
     } else if (!clusterModel.isClusterAlive()) {
       throw new IllegalArgumentException("All brokers are dead in the cluster.");
@@ -368,12 +398,8 @@ public class GoalOptimizer implements Runnable {
 
     Set<String> excludedTopics = excludedTopics(clusterModel, null);
     LOG.debug("Topics excluded from partition movement: {}", excludedTopics);
-    OptimizationOptions optimizationOptions = new OptimizationOptions(excludedTopics,
-                                                                      Collections.emptySet(),
-                                                                      Collections.emptySet(),
-                                                                      false,
-                                                                      Collections.emptySet(),
-                                                                      false);
+    OptimizationOptions optimizationOptions =
+        _optimizationOptionsGenerator.optimizationOptionsForCachedProposalCalculation(clusterModel, excludedTopics);
     return optimizations(clusterModel, goalsByPriority, operationProgress, null, optimizationOptions);
   }
 
@@ -403,6 +429,7 @@ public class GoalOptimizer implements Runnable {
    *                                                     specific topic partition's replication factor, in this case some
    *                                                     replicas are tentatively deleted/added in cluster model before
    *                                                     passing it in to generate proposals.
+   * @param optimizationOptions Optimization options.
    * @return Results of optimization containing the proposals and stats.
    */
   public OptimizerResult optimizations(ClusterModel clusterModel,
@@ -419,38 +446,57 @@ public class GoalOptimizer implements Runnable {
 
     // Set of balancing proposals that will be applied to the given cluster state to satisfy goals (leadership
     // transfer AFTER partition transfer.)
-    Set<Goal> optimizedGoals = new HashSet<>(goalsByPriority.size());
+    Set<Goal> optimizedGoals = new HashSet<>();
     Set<String> violatedGoalNamesBeforeOptimization = new HashSet<>();
     Set<String> violatedGoalNamesAfterOptimization = new HashSet<>();
     LinkedHashMap<Goal, ClusterModelStats> statsByGoalPriority = new LinkedHashMap<>(goalsByPriority.size());
     Map<TopicPartition, List<ReplicaPlacementInfo>> preOptimizedReplicaDistribution = null;
     Map<TopicPartition, ReplicaPlacementInfo> preOptimizedLeaderDistribution = null;
 
+    ProvisionResponse provisionResponse = new ProvisionResponse(ProvisionStatus.UNDECIDED);
+    Map<String, Duration> optimizationDurationByGoal = new HashMap<>();
     for (Goal goal : goalsByPriority) {
       preOptimizedReplicaDistribution = preOptimizedReplicaDistribution == null ? initReplicaDistribution : clusterModel.getReplicaDistribution();
       preOptimizedLeaderDistribution = preOptimizedLeaderDistribution == null ? initLeaderDistribution : clusterModel.getLeaderDistribution();
       OptimizationForGoal step = new OptimizationForGoal(goal.name());
       operationProgress.addStep(step);
       LOG.debug("Optimizing goal {}", goal.name());
-      boolean succeeded = goal.optimize(clusterModel, optimizedGoals, optimizationOptions);
+      long startTimeMs = _time.milliseconds();
+      boolean succeeded;
+      try {
+        succeeded = goal.optimize(clusterModel, optimizedGoals, optimizationOptions);
+      } catch (OptimizationFailureException e) {
+        setHasUnfixableProposalOptimization(true, goalsByPriority);
+        throw e;
+      }
       optimizedGoals.add(goal);
-      statsByGoalPriority.put(goal, clusterModel.getClusterStats(_balancingConstraint));
+      statsByGoalPriority.put(goal, clusterModel.getClusterStats(_balancingConstraint, optimizationOptions));
+      optimizationDurationByGoal.put(goal.name(), Duration.ofMillis(_time.milliseconds() - startTimeMs));
 
-      Set<ExecutionProposal> goalProposals = AnalyzerUtils.getDiff(preOptimizedReplicaDistribution,
-                                                                   preOptimizedLeaderDistribution,
-                                                                   clusterModel);
-      if (!goalProposals.isEmpty() || !succeeded) {
+      boolean hasDiff = AnalyzerUtils.hasDiff(preOptimizedReplicaDistribution, preOptimizedLeaderDistribution, clusterModel);
+      if (hasDiff || !succeeded) {
         violatedGoalNamesBeforeOptimization.add(goal.name());
       }
       if (!succeeded) {
         violatedGoalNamesAfterOptimization.add(goal.name());
       }
-      logProgress(isSelfHealing, goal.name(), optimizedGoals.size(), goalProposals);
+
       step.done();
       if (LOG.isDebugEnabled()) {
         LOG.debug("Broker level stats after optimization: {}", clusterModel.brokerStats(null));
       }
+      provisionResponse.aggregate(goal.provisionResponse());
+      LOG.info("[{}/{}] Generated {} proposals for {}{}. Provision status: {}; aggregated provision status: {}",
+               optimizedGoals.size(),
+               _goalsByPriority.size(),
+               hasDiff ? "some" : "no",
+               isSelfHealing ? "self-healing " : "",
+               goal.name(),
+               goal.provisionResponse().status(),
+               provisionResponse.status());
     }
+
+    setHasUnfixableProposalOptimization(false, goalsByPriority);
 
     // Broker level stats in the final cluster state.
     if (LOG.isTraceEnabled()) {
@@ -470,12 +516,21 @@ public class GoalOptimizer implements Runnable {
                                violatedGoalNamesAfterOptimization,
                                proposals,
                                brokerStatsBeforeOptimization,
-                               clusterModel.brokerStats(null),
-                               clusterModel.generation(),
-                               clusterModel.getClusterStats(_balancingConstraint),
-                               clusterModel.capacityEstimationInfoByBrokerId(),
+                               clusterModel,
                                optimizationOptions,
-                               balancednessCostByGoal(goalsByPriority, _priorityWeight, _strictnessWeight));
+                               balancednessCostByGoal(goalsByPriority, _priorityWeight, _strictnessWeight),
+                               optimizationDurationByGoal,
+                               provisionResponse);
+  }
+
+  private void setHasUnfixableProposalOptimization(boolean hasUnfixableProposalOptimization, List<Goal> goalsByPriority) {
+    // Optimize function can be called for any of the actions like GoalViolation, Add Broker, Demote Broker, Broker Failure,
+    // Manual rebalance etc
+    // List of goals supplied should be a super set of goals defined by default. Then only we can conclusively say that we have or don't
+    // have any unfixable proposal optimization.
+    if (goalsByPriority.containsAll(_goalsByPriority)) {
+      _hasUnfixableProposalOptimization = hasUnfixableProposalOptimization;
+    }
   }
 
   /**
@@ -487,26 +542,15 @@ public class GoalOptimizer implements Runnable {
    */
   public Set<String> excludedTopics(ClusterModel clusterModel, Pattern requestedExcludedTopics) {
     Pattern topicsToExclude = requestedExcludedTopics != null ? requestedExcludedTopics : _defaultExcludedTopics;
-    return clusterModel.topics()
-                       .stream()
-                       .filter(topic -> topicsToExclude.matcher(topic).matches())
-                       .collect(Collectors.toSet());
+    return Utils.getTopicNamesMatchedWithPattern(topicsToExclude, clusterModel::topics);
   }
 
   /**
-   * Log the progress of goal optimizer.
-   *
-   * @param isSelfHeal     True if self healing, false otherwise.
-   * @param goalName       Goal name.
-   * @param proposals      Goal proposals.
+   * Get the broker set resolver
+   * @return the configured BrokerSetResolver instance
    */
-  private void logProgress(boolean isSelfHeal,
-                           String goalName,
-                           int numOptimizedGoals,
-                           Set<ExecutionProposal> proposals) {
-    LOG.debug("[{}/{}] Generated {} proposals for {}{}.", numOptimizedGoals, _goalsByPriority.size(), proposals.size(),
-              isSelfHeal ? "self-healing " : "", goalName);
-    LOG.trace("Proposals for {}{}.{}%n", isSelfHeal ? "self-healing " : "", goalName, proposals);
+  public BrokerSetResolver brokerSetResolver() {
+    return _balancingConstraint.brokerSetResolver();
   }
 
   private OptimizerResult updateCachedProposals(OptimizerResult result) {
@@ -554,10 +598,9 @@ public class GoalOptimizer implements Runnable {
       try (AutoCloseable ignored = _loadMonitor.acquireForModelGeneration(operationProgress)) {
         long startMs = _time.milliseconds();
         // We compute the proposal even if there is not enough modeled partitions.
-        ModelCompletenessRequirements requirements = _loadMonitor.meetCompletenessRequirements(_defaultModelCompletenessRequirements) ?
-                                                     _defaultModelCompletenessRequirements : _requirementsWithAvailableValidWindows;
-        ClusterModel clusterModel = _loadMonitor.clusterModel(_time.milliseconds(), requirements, operationProgress);
-        sanityCheckCapacityEstimation(_allowCapacityEstimation, clusterModel.capacityEstimationInfoByBrokerId());
+        ModelCompletenessRequirements requirements = _loadMonitor.meetCompletenessRequirements(_defaultModelCompletenessRequirements)
+                                                     ? _defaultModelCompletenessRequirements : _requirementsWithAvailableValidWindows;
+        ClusterModel clusterModel = _loadMonitor.clusterModel(_time.milliseconds(), requirements, _allowCapacityEstimation, operationProgress);
         if (!clusterModel.topics().isEmpty()) {
           OptimizerResult result = optimizations(clusterModel, _goalsByPriority, operationProgress);
           LOG.debug("Generated a proposal candidate in {} ms.", _time.milliseconds() - startMs);

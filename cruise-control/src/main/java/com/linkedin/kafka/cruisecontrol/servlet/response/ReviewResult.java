@@ -5,18 +5,15 @@
 package com.linkedin.kafka.cruisecontrol.servlet.response;
 
 import com.google.gson.Gson;
-import com.linkedin.kafka.cruisecontrol.KafkaCruiseControlUtils;
 import com.linkedin.kafka.cruisecontrol.config.KafkaCruiseControlConfig;
 import com.linkedin.cruisecontrol.servlet.parameters.CruiseControlParameters;
 import com.linkedin.kafka.cruisecontrol.servlet.purgatory.RequestInfo;
 import java.util.ArrayList;
-import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
 
-import static com.linkedin.kafka.cruisecontrol.KafkaCruiseControlUtils.DATE_FORMAT;
-import static com.linkedin.kafka.cruisecontrol.KafkaCruiseControlUtils.TIME_ZONE;
+import static com.linkedin.cruisecontrol.CruiseControlUtils.utcDateFor;
 import static com.linkedin.kafka.cruisecontrol.servlet.response.ResponseUtils.VERSION;
 import static com.linkedin.kafka.cruisecontrol.servlet.response.ResponseUtils.JSON_VERSION;
 
@@ -46,7 +43,8 @@ public class ReviewResult extends AbstractCruiseControlResponse {
     // Plaintext response, each column name will be underscore-separated instead of case-separated.
     int idLabelSize = RequestInfo.ID.length();
     int submitterAddressLabelSize = RequestInfo.SUBMITTER_ADDRESS.length() + 1;
-    int submissionTimeLabelSize = RequestInfo.SUBMISSION_TIME_MS.length() - 2; // Returns submission_time -- i.e. not submission_time_ms.
+    // Returns submission_time -- i.e. not submission_time_ms.
+    int submissionTimeLabelSize = RequestInfo.SUBMISSION_TIME_MS.length() - 2;
     int statusLabelSize = RequestInfo.STATUS.length();
     int endpointWithParamsLabelSize = RequestInfo.ENDPOINT_WITH_PARAMS.length() + 2;
     int reasonLabelSize = RequestInfo.REASON.length();
@@ -59,7 +57,7 @@ public class ReviewResult extends AbstractCruiseControlResponse {
         // SUBMITTER_ADDRESS
         submitterAddressLabelSize = Math.max(submitterAddressLabelSize, requestInfo.submitterAddress().length());
         // SUBMISSION_TIME_MS
-        String dateFormatted = KafkaCruiseControlUtils.toDateString(requestInfo.submissionTimeMs(), DATE_FORMAT, TIME_ZONE);
+        String dateFormatted = utcDateFor(requestInfo.submissionTimeMs());
         submissionTimeLabelSize = Math.max(submissionTimeLabelSize, dateFormatted.length());
         // STATUS
         statusLabelSize = Math.max(statusLabelSize, requestInfo.status().toString().length());
@@ -91,7 +89,7 @@ public class ReviewResult extends AbstractCruiseControlResponse {
     for (Map.Entry<Integer, RequestInfo> entry : _requestInfoById.entrySet()) {
       if (_filteredRequestIds.contains(entry.getKey())) {
         RequestInfo requestInfo = entry.getValue();
-        String dateFormatted = KafkaCruiseControlUtils.toDateString(requestInfo.submissionTimeMs(), DATE_FORMAT, TIME_ZONE);
+        String dateFormatted = utcDateFor(requestInfo.submissionTimeMs());
         sb.append(String.format(formattingStringBuilder.toString(), entry.getKey(), requestInfo.submitterAddress(),
                                 dateFormatted, requestInfo.status(), requestInfo.endpointWithParams(), requestInfo.reason()));
       }
@@ -100,23 +98,21 @@ public class ReviewResult extends AbstractCruiseControlResponse {
     return sb.toString();
   }
 
-  protected String getJSONString() {
+  protected String getJsonString() {
     List<Map<String, Object>> jsonRequestInfoList = new ArrayList<>(_filteredRequestIds.size());
     for (Map.Entry<Integer, RequestInfo> entry : _requestInfoById.entrySet()) {
       if (_filteredRequestIds.contains(entry.getKey())) {
         jsonRequestInfoList.add(entry.getValue().getJsonStructure(entry.getKey()));
       }
     }
-    Map<String, Object> jsonResponse = new HashMap<>(2);
-    jsonResponse.put(REQUEST_INFO, jsonRequestInfoList);
-    jsonResponse.put(VERSION, JSON_VERSION);
+    Map<String, Object> jsonResponse = Map.of(REQUEST_INFO, jsonRequestInfoList, VERSION, JSON_VERSION);
     return new Gson().toJson(jsonResponse);
   }
 
   @Override
   protected void discardIrrelevantAndCacheRelevant(CruiseControlParameters parameters) {
     // Cache relevant response.
-    _cachedResponse = parameters.json() ? getJSONString() : getPlaintext();
+    _cachedResponse = parameters.json() ? getJsonString() : getPlaintext();
     // Discard irrelevant response.
     _requestInfoById.clear();
     _filteredRequestIds.clear();

@@ -40,11 +40,6 @@ public class RawMetricValues extends WindowIndexedArrays {
   // A bit set to indicate whether a given window is valid or not.
   private final BitSet _validity;
 
-  @Override
-  protected int length() {
-    return _counts.length;
-  }
-
   /**
    * Construct a RawMetricValues.
    *
@@ -55,15 +50,20 @@ public class RawMetricValues extends WindowIndexedArrays {
   public RawMetricValues(int numWindowsToKeep, byte minSamplesPerWindow, int numMetricTypesInSample) {
     if (numWindowsToKeep <= 1) {
       throw new IllegalArgumentException("The number of windows should be at least 2 because at least one available"
-                                             + " window and one current window are needed.");
+                                         + " window and one current window are needed.");
     }
-    _windowValuesByMetricId = new HashMap<>(numMetricTypesInSample);
+    _windowValuesByMetricId = new HashMap<>();
     _counts = new byte[numWindowsToKeep];
     _extrapolations = new BitSet(numWindowsToKeep);
     _validity = new BitSet(numWindowsToKeep);
     _minSamplesPerWindow = minSamplesPerWindow;
     _halfMinRequiredSamples = (byte) Math.max(1, _minSamplesPerWindow / 2);
     _oldestWindowIndex = Long.MAX_VALUE;
+  }
+
+  @Override
+  protected int length() {
+    return _counts.length;
   }
 
   /**
@@ -157,11 +157,11 @@ public class RawMetricValues extends WindowIndexedArrays {
 
   /**
    * Check whether this raw metric value is valid or not. The raw metric value is valid if:
-   * 1. All the stable windows are <tt>valid</tt> (See {@link MetricSampleAggregator}, AND
+   * 1. All the stable windows are {@code valid} (See {@link MetricSampleAggregator}, AND
    * 2. The number of windows with extrapolation is less than the given maxAllowedWindowsWithExtrapolation.
    *
    * @param maxAllowedWindowsWithExtrapolation the maximum number of allowed windows with extrapolation.
-   * @return True if the raw metric value is valid, false otherwise.
+   * @return {@code true} if the raw metric value is valid, {@code false} otherwise.
    */
   public synchronized boolean isValid(int maxAllowedWindowsWithExtrapolation) {
     int currentArrayIndex = arrayIndex(currentWindowIndex());
@@ -186,7 +186,7 @@ public class RawMetricValues extends WindowIndexedArrays {
    * Assumes {@link #sanityCheckWindowIndex(long)} is called before this function.
    *
    * @param windowIndex the window index to check.
-   * @return True if the given window is valid, false otherwise.
+   * @return {@code true} if the given window is valid, {@code false} otherwise.
    */
   public synchronized boolean isValidAtWindowIndex(long windowIndex) {
     return _validity.get(arrayIndex(windowIndex));
@@ -197,7 +197,7 @@ public class RawMetricValues extends WindowIndexedArrays {
    * Assumes {@link #sanityCheckWindowIndex(long)} is called before this function.
    *
    * @param windowIndex the index of the window to check.
-   * @return True if the window is extrapolated, false otherwise.
+   * @return {@code true} if the window is extrapolated, {@code false} otherwise.
    */
   public synchronized boolean isExtrapolatedAtWindowIndex(long windowIndex) {
     return _extrapolations.get(arrayIndex(windowIndex));
@@ -206,6 +206,7 @@ public class RawMetricValues extends WindowIndexedArrays {
   /**
    * Assumes {@link #sanityCheckWindowIndex(long)} is called before this function.
    *
+   * @param windowIndex Window index.
    * @return sample counts at window index.
    */
   public synchronized byte sampleCountsAtWindowIndex(long windowIndex) {
@@ -266,23 +267,11 @@ public class RawMetricValues extends WindowIndexedArrays {
     return aggregate(windowIndices, metricDef, true);
   }
 
-  /**
-   * Peek the value for the current window.
-   *
-   * @param metricDef the metric definitions.
-   * @return The aggregated values and extrapolations of the given sorted set of windows in that order.
-   */
-  public synchronized ValuesAndExtrapolations peekCurrentWindow(long currentWindowIndex, MetricDef metricDef) {
-    SortedSet<Long> window = new TreeSet<>();
-    window.add(currentWindowIndex);
-    return aggregate(window, metricDef, false);
-  }
-
   private ValuesAndExtrapolations aggregate(SortedSet<Long> windowIndices, MetricDef metricDef, boolean checkWindow) {
     if (_windowValuesByMetricId.isEmpty()) {
       return ValuesAndExtrapolations.empty(windowIndices.size(), metricDef);
     }
-    Map<Short, MetricValues> aggValues = new HashMap<>(_windowValuesByMetricId.size());
+    Map<Short, MetricValues> aggValues = new HashMap<>();
     SortedMap<Integer, Extrapolation> extrapolations = new TreeMap<>();
     for (Map.Entry<Short, float[]> entry : _windowValuesByMetricId.entrySet()) {
       short metricId = entry.getKey();
@@ -322,7 +311,7 @@ public class RawMetricValues extends WindowIndexedArrays {
             case AVG:
               aggValuesForMetric.set(resultIndex, total / (_counts[prevArrayIndex] + _counts[arrayIndex] + _counts[nextArrayIndex]));
               break;
-            case MAX: // fall through.
+            case MAX:
             case LATEST:
               // for max and latest, we already only keep the largest or last value.
               aggValuesForMetric.set(resultIndex, total / (_counts[arrayIndex] > 0 ? 3 : 2));
@@ -330,11 +319,11 @@ public class RawMetricValues extends WindowIndexedArrays {
             default:
               throw new IllegalStateException("Should never be here.");
           }
-        // Neighbor not available, use the insufficient samples.
+          // Neighbor not available, use the insufficient samples.
         } else if (_counts[arrayIndex] > 0) {
           aggValuesForMetric.set(resultIndex, getValue(info, arrayIndex, values));
           extrapolations.putIfAbsent(resultIndex, Extrapolation.FORCED_INSUFFICIENT);
-        // Nothing is available, just return all 0 and NO_VALID_EXTRAPOLATION.
+          // Nothing is available, just return all 0 and NO_VALID_EXTRAPOLATION.
         } else {
           aggValuesForMetric.set(resultIndex, 0);
           extrapolations.putIfAbsent(resultIndex, Extrapolation.NO_VALID_EXTRAPOLATION);
@@ -343,6 +332,19 @@ public class RawMetricValues extends WindowIndexedArrays {
       }
     }
     return new ValuesAndExtrapolations(new AggregatedMetricValues(aggValues), extrapolations);
+  }
+
+  /**
+   * Peek the value for the current window.
+   *
+   * @param currentWindowIndex Current window index.
+   * @param metricDef the metric definitions.
+   * @return The aggregated values and extrapolations of the given sorted set of windows in that order.
+   */
+  public synchronized ValuesAndExtrapolations peekCurrentWindow(long currentWindowIndex, MetricDef metricDef) {
+    SortedSet<Long> window = new TreeSet<>();
+    window.add(currentWindowIndex);
+    return aggregate(window, metricDef, false);
   }
 
   /**
@@ -417,7 +419,8 @@ public class RawMetricValues extends WindowIndexedArrays {
   }
 
   /**
-   * if there are {@link #_minSamplesPerWindow}, then valid: true, extrapolation: false
+   * @param arrayIndex Array index.
+   * @return if there are {@link #_minSamplesPerWindow}, then valid: {@code true}, extrapolation: {@code false}
    */
   private boolean updateEnoughSamples(int arrayIndex) {
     if (_counts[arrayIndex] == _minSamplesPerWindow) {
@@ -429,7 +432,8 @@ public class RawMetricValues extends WindowIndexedArrays {
   }
 
   /**
-   * regardless of the number of samples in the given arrayIndex, if next and previous array indices are valid and have
+   * @param arrayIndex Array index.
+   * @return regardless of the number of samples in the given arrayIndex, if next and previous array indices are valid and have
    * more than {@link #_minSamplesPerWindow}, then valid: true, extrapolation: true
    */
   private boolean updateAvgAdjacent(int arrayIndex) {
@@ -447,7 +451,8 @@ public class RawMetricValues extends WindowIndexedArrays {
   }
 
   /**
-   * if there is at least one sample, then valid: true, extrapolation: true
+   * @param arrayIndex Array index.
+   * @return if there is at least one sample, then valid: true, extrapolation: true
    */
   private boolean updateForcedInsufficient(int arrayIndex) {
     if (_counts[arrayIndex] > 0) {

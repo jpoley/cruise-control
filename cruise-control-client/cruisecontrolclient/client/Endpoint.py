@@ -21,7 +21,7 @@ class AbstractEndpoint(metaclass=ABCMeta):
 
     # A string, like 'load' or 'state'
     # Meant to match those enumerated Strings at:
-    # https://github.com/linkedin/cruise-control/blob/master/cruise-control/src/main/java/com/linkedin/kafka/cruisecontrol/servlet/EndPoint.java#L15
+    # https://github.com/linkedin/cruise-control/blob/migrate_to_kafka_2_4/cruise-control/src/main/java/com/linkedin/kafka/cruisecontrol/servlet/CruiseControlEndPoint.java#L16
     name: ClassVar[str]
 
     # A human-readable string that describes this endpoint
@@ -175,6 +175,7 @@ class AddBrokerEndpoint(AbstractEndpoint):
         CCParameter.ReviewIDParameter,
         CCParameter.ReplicaMovementStrategiesParameter,
         CCParameter.SkipHardGoalCheckParameter,
+        CCParameter.StopOngoingExecutionParameter,
         CCParameter.ThrottleRemovedBrokerParameter,
         CCParameter.UseReadyDefaultGoalsParameter,
         CCParameter.VerboseParameter
@@ -244,6 +245,7 @@ class DemoteBrokerEndpoint(AbstractEndpoint):
         CCParameter.ReplicaMovementStrategiesParameter,
         CCParameter.ReviewIDParameter,
         CCParameter.SkipURPDemotionParameter,
+        CCParameter.StopOngoingExecutionParameter,
         CCParameter.VerboseParameter
     )
     argparse_properties = {
@@ -276,6 +278,7 @@ class FixOfflineReplicasEndpoint(AbstractEndpoint):
         CCParameter.ReplicaMovementStrategiesParameter,
         CCParameter.ReviewIDParameter,
         CCParameter.SkipHardGoalCheckParameter,
+        CCParameter.StopOngoingExecutionParameter,
         CCParameter.UseReadyDefaultGoalsParameter,
         CCParameter.VerboseParameter
     )
@@ -291,6 +294,7 @@ class KafkaClusterStateEndpoint(AbstractEndpoint):
     http_method = "GET"
     can_execute_proposal = False
     available_Parameters = (
+        CCParameter.TopicParameter,
         CCParameter.JSONParameter,
         CCParameter.VerboseParameter
     )
@@ -357,6 +361,19 @@ class PauseSamplingEndpoint(AbstractEndpoint):
         'kwargs': dict(aliases=[name.replace('_', '-')], help=description)
     }
 
+class PermissionsEndpoint(AbstractEndpoint):
+    name = "permissions"
+    description = "Get the permissions of a user specified as a query parameter"
+    http_method = "GET"
+    can_execute_proposal = False
+    available_Parameters = (
+        CCParameter.JSONParameter,
+        CCParameter.ReasonParameter
+    )
+    argparse_properties = {
+        'args': (name,),
+        'kwargs': dict(help=description)
+    }
 
 class ProposalsEndpoint(AbstractEndpoint):
     name = "proposals"
@@ -402,6 +419,7 @@ class RebalanceEndpoint(AbstractEndpoint):
         CCParameter.ReplicaMovementStrategiesParameter,
         CCParameter.ReviewIDParameter,
         CCParameter.SkipHardGoalCheckParameter,
+        CCParameter.StopOngoingExecutionParameter,
         CCParameter.UseReadyDefaultGoalsParameter,
         CCParameter.VerboseParameter
     )
@@ -435,6 +453,7 @@ class RemoveBrokerEndpoint(AbstractEndpoint):
         CCParameter.ReplicaMovementStrategiesParameter,
         CCParameter.ReviewIDParameter,
         CCParameter.SkipHardGoalCheckParameter,
+        CCParameter.StopOngoingExecutionParameter,
         CCParameter.ThrottleRemovedBrokerParameter,
         CCParameter.UseReadyDefaultGoalsParameter,
         CCParameter.VerboseParameter
@@ -497,6 +516,23 @@ class ReviewBoardEndpoint(AbstractEndpoint):
     }
 
 
+class RightsizeEndpoint(AbstractEndpoint):
+    name = "rightsize"
+    description = "Rightsize the broker or partition count"
+    http_method = "POST"
+    can_execute_proposal = True
+    available_Parameters = (
+        CCParameter.JSONParameter,
+        CCParameter.TopicParameter,
+        CCParameter.PartitionCountParameter,
+        CCParameter.NumBrokersToAddParameter
+    )
+    argparse_properties = {
+        'args': (name,),
+        'kwargs': dict(help=description)
+    }
+
+
 class StateEndpoint(AbstractEndpoint):
     name = "state"
     description = "Get the state of cruise control"
@@ -526,6 +562,7 @@ class StopProposalExecutionEndpoint(AbstractEndpoint):
     http_method = "POST"
     can_execute_proposal = False
     available_Parameters = (
+        CCParameter.ForceStopParameter,
         CCParameter.JSONParameter,
         CCParameter.ReviewIDParameter,
     )
@@ -555,6 +592,7 @@ class TopicConfigurationEndpoint(AbstractEndpoint):
         CCParameter.ReviewIDParameter,
         CCParameter.SkipHardGoalCheckParameter,
         CCParameter.SkipRackAwarenessCheckParameter,
+        CCParameter.StopOngoingExecutionParameter,
         CCParameter.TopicParameter,
         CCParameter.VerboseParameter
     )

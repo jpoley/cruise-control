@@ -5,7 +5,6 @@
 package com.linkedin.kafka.cruisecontrol.monitor;
 
 import com.linkedin.cruisecontrol.monitor.sampling.aggregator.AggregatedMetricValues;
-import com.linkedin.cruisecontrol.monitor.sampling.aggregator.Extrapolation;
 import com.linkedin.cruisecontrol.monitor.sampling.aggregator.MetricValues;
 import com.linkedin.cruisecontrol.monitor.sampling.aggregator.ValuesAndExtrapolations;
 import com.linkedin.kafka.cruisecontrol.common.Resource;
@@ -13,50 +12,53 @@ import com.linkedin.kafka.cruisecontrol.analyzer.goals.Goal;
 import com.linkedin.kafka.cruisecontrol.config.BrokerCapacityConfigResolver;
 import com.linkedin.kafka.cruisecontrol.config.BrokerCapacityInfo;
 import com.linkedin.kafka.cruisecontrol.config.KafkaCruiseControlConfig;
+import com.linkedin.kafka.cruisecontrol.exception.BrokerCapacityResolutionException;
 import com.linkedin.kafka.cruisecontrol.model.Broker;
 import com.linkedin.kafka.cruisecontrol.model.ClusterModel;
 import com.linkedin.kafka.cruisecontrol.model.ModelUtils;
 import com.linkedin.kafka.cruisecontrol.monitor.metricdefinition.KafkaMetricDef;
-import com.linkedin.kafka.cruisecontrol.monitor.sampling.holder.PartitionEntity;
-import com.linkedin.kafka.cruisecontrol.monitor.sampling.aggregator.SampleExtrapolation;
-import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collection;
+import java.util.Collections;
 import java.util.HashMap;
 import java.util.HashSet;
-import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 import java.util.stream.Collectors;
-import kafka.zk.KafkaZkClient;
 import org.apache.kafka.clients.admin.AdminClient;
+import org.apache.kafka.clients.admin.LogDirDescription;
+import org.apache.kafka.clients.admin.ReplicaInfo;
 import org.apache.kafka.common.Cluster;
 import org.apache.kafka.common.KafkaFuture;
 import org.apache.kafka.common.Node;
 import org.apache.kafka.common.PartitionInfo;
 import org.apache.kafka.common.TopicPartition;
-import org.apache.kafka.common.protocol.Errors;
-import org.apache.kafka.common.requests.DescribeLogDirsResponse;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-import scala.collection.JavaConversions;
 
 import static com.linkedin.kafka.cruisecontrol.config.constants.ExecutorConfig.LOGDIR_RESPONSE_TIMEOUT_MS_CONFIG;
 import static com.linkedin.kafka.cruisecontrol.model.Disk.State.DEAD;
 import static com.linkedin.kafka.cruisecontrol.monitor.metricdefinition.KafkaMetricDef.CPU_USAGE;
-import static java.lang.Thread.sleep;
 
 
 /**
  * A util class for Monitor.
  */
-public class MonitorUtils {
+public final class MonitorUtils {
   // A utility variable for conversion of unit interval to percentage -- i.e. [0, 1.0] -> [0, 100.0].
   public static final double UNIT_INTERVAL_TO_PERCENTAGE = 100.0;
   private static final Logger LOG = LoggerFactory.getLogger(MonitorUtils.class);
+  public static final Map<Resource, Double> EMPTY_BROKER_CAPACITY;
+  public static final long BROKER_CAPACITY_FETCH_TIMEOUT_MS = TimeUnit.SECONDS.toMillis(10);
+
+  static {
+    Map<Resource, Double> emptyBrokerCapacity = new HashMap<>();
+    Resource.cachedValues().forEach(r -> emptyBrokerCapacity.put(r, 0.0));
+    EMPTY_BROKER_CAPACITY = Collections.unmodifiableMap(emptyBrokerCapacity);
+  }
 
   private MonitorUtils() {
 
@@ -65,7 +67,7 @@ public class MonitorUtils {
   /**
    * Derive follower load from the leader load.
    * <p>
-   * If linear regression model is used, the The way we derive the follower metrics is the following:
+   * If linear regression model is used, the way we derive the follower metrics is the following:
    * <ul>
    * <li>FOLLOWER_CPU = LEADER_NETWORK_IN * coefficient + residue </li>
    * <li>FOLLOWER_DISK = LEADER_DISK </li>
@@ -76,6 +78,7 @@ public class MonitorUtils {
    * If linear regression model is not used, CPU utilization of the follower will be fixed to be 0.2;
    *
    * @param aggregatedMetricValues the leader aggregated metric values to convert.
+   * @return The aggregated metric values for the corresponding follower.
    */
   private static AggregatedMetricValues toFollowerMetricValues(AggregatedMetricValues aggregatedMetricValues) {
     AggregatedMetricValues followerLoad = new AggregatedMetricValues();
@@ -105,30 +108,32 @@ public class MonitorUtils {
   }
 
   /**
-   * @return True if the metadata has changed, false otherwise.
+   * @param previous Previous cluster state.
+   * @param current Current cluster state.
+   * @return {@code true} if the metadata has changed, {@code false} otherwise.
    */
-  public static boolean metadataChanged(Cluster prev, Cluster curr) {
+  public static boolean metadataChanged(Cluster previous, Cluster current) {
     // Broker has changed.
-    Set<Node> prevNodeSet = new HashSet<>(prev.nodes());
-    if (prevNodeSet.size() != curr.nodes().size()) {
+    Set<Node> prevNodeSet = new HashSet<>(previous.nodes());
+    if (prevNodeSet.size() != current.nodes().size()) {
       return true;
     }
-    prevNodeSet.removeAll(curr.nodes());
+    current.nodes().forEach(prevNodeSet::remove);
     if (!prevNodeSet.isEmpty()) {
       return true;
     }
     // Topic has changed
-    if (!prev.topics().equals(curr.topics())) {
+    if (!previous.topics().equals(current.topics())) {
       return true;
     }
 
     // partition has changed.
-    for (String topic : prev.topics()) {
-      if (!prev.partitionCountForTopic(topic).equals(curr.partitionCountForTopic(topic))) {
+    for (String topic : previous.topics()) {
+      if (!previous.partitionCountForTopic(topic).equals(current.partitionCountForTopic(topic))) {
         return true;
       }
-      for (PartitionInfo prevPartInfo : prev.partitionsForTopic(topic)) {
-        PartitionInfo currPartInfo = curr.partition(new TopicPartition(prevPartInfo.topic(), prevPartInfo.partition()));
+      for (PartitionInfo prevPartInfo : previous.partitionsForTopic(topic)) {
+        PartitionInfo currPartInfo = current.partition(new TopicPartition(prevPartInfo.topic(), prevPartInfo.partition()));
         if (leaderChanged(prevPartInfo, currPartInfo) || replicaListChanged(prevPartInfo, currPartInfo)) {
           return true;
         }
@@ -182,49 +187,6 @@ public class MonitorUtils {
       totalNumPartitions += cluster.partitionCountForTopic(topic);
     }
     return totalNumPartitions;
-  }
-
-  /**
-   * Check whether the topic has partitions undergoing partition reassignment and wait for the reassignments to finish.
-   *
-   * @param kafkaZkClient the KafkaZkClient class used to check ongoing partition reassignments.
-   * @return Whether there are no ongoing partition reassignments.
-   */
-  public static boolean ensureTopicNotUnderPartitionReassignment(KafkaZkClient kafkaZkClient, String topic) {
-    int attempt = 0;
-    while (JavaConversions.asJavaCollection(kafkaZkClient.getPartitionReassignment().keys()).stream()
-                          .anyMatch(tp -> tp.topic().equals(topic))) {
-      try {
-        sleep(1000 << attempt);
-      } catch (InterruptedException e) {
-        // Let it go.
-      }
-      if (++attempt == 10) {
-        return false;
-      }
-    }
-    return true;
-  }
-
-  /**
-   * Check whether there are ongoing partition reassignments and wait for the reassignments to finish.
-   *
-   * @param kafkaZkClient the KafkaZkClient class used to check ongoing partition reassignments.
-   * @return Whether there are no ongoing partition reassignments.
-   */
-  public static boolean ensureNoPartitionUnderPartitionReassignment(KafkaZkClient kafkaZkClient) {
-    int attempt = 0;
-    while (kafkaZkClient.getPartitionReassignment().size() > 0) {
-      try {
-        sleep(1000 << attempt);
-      } catch (InterruptedException e) {
-        // Let it go.
-      }
-      if (++attempt == 10) {
-        return false;
-      }
-    }
-    return true;
   }
 
   /**
@@ -320,6 +282,36 @@ public class MonitorUtils {
 
   /**
    * @param cluster Kafka cluster.
+   * @return Number of replicas in the cluster.
+   */
+  static int numReplicas(Cluster cluster) {
+    int numReplicas = 0;
+    for (String topic : cluster.topics()) {
+      for (PartitionInfo partition : cluster.partitionsForTopic(topic)) {
+        numReplicas += (partition.replicas() == null ? 0 : partition.replicas().length);
+      }
+    }
+    return numReplicas;
+  }
+
+  /**
+   * @param cluster Kafka cluster.
+   * @return {@code true} if the cluster has partitions with ISR greater than replicas, {@code false} otherwise.
+   */
+  static boolean hasPartitionsWithIsrGreaterThanReplicas(Cluster cluster) {
+    for (String topic : cluster.topics()) {
+      for (PartitionInfo partitionInfo : cluster.partitionsForTopic(topic)) {
+        int numISR = partitionInfo.inSyncReplicas().length;
+        if (numISR > partitionInfo.replicas().length) {
+          return true;
+        }
+      }
+    }
+    return false;
+  }
+
+  /**
+   * @param cluster Kafka cluster.
    * @return All the dead brokers in the cluster that host at least one replica.
    */
   static Set<Integer> deadBrokersWithReplicas(Cluster cluster) {
@@ -364,24 +356,6 @@ public class MonitorUtils {
   }
 
   /**
-   * @param valuesAndExtrapolations The aggregated metric values for windows and the extrapolation information by partitions.
-   * @return Sample extrapolations by partitions.
-   */
-  static Map<TopicPartition, List<SampleExtrapolation>> partitionSampleExtrapolations(Map<PartitionEntity, ValuesAndExtrapolations> valuesAndExtrapolations) {
-    Map<TopicPartition, List<SampleExtrapolation>> sampleExtrapolations = new HashMap<>();
-    for (Map.Entry<PartitionEntity, ValuesAndExtrapolations> entry : valuesAndExtrapolations.entrySet()) {
-      TopicPartition tp = entry.getKey().tp();
-      Map<Integer, Extrapolation> extrapolations = entry.getValue().extrapolations();
-      if (!extrapolations.isEmpty()) {
-        List<SampleExtrapolation> extrapolationForPartition = sampleExtrapolations.computeIfAbsent(tp, p -> new ArrayList<>());
-        extrapolations.forEach((t, extrapolation) -> extrapolationForPartition.add(new SampleExtrapolation(t, extrapolation)));
-      }
-    }
-
-    return sampleExtrapolations;
-  }
-
-  /**
    * Get replica placement information, i.e. each replica resides on which logdir of the broker.
    *
    * @param clusterModel The cluster model to populate replica placement information.
@@ -396,15 +370,15 @@ public class MonitorUtils {
                                                                            AdminClient adminClient,
                                                                            KafkaCruiseControlConfig config) {
     Map<TopicPartition, Map<Integer, String>> replicaPlacementInfo = new HashMap<>();
-    Map<Integer, KafkaFuture<Map<String, DescribeLogDirsResponse.LogDirInfo>>> logDirsByBrokerId =
-        adminClient.describeLogDirs(cluster.nodes().stream().mapToInt(Node::id).boxed().collect(Collectors.toList())).values();
-    for (Map.Entry<Integer, KafkaFuture<Map<String, DescribeLogDirsResponse.LogDirInfo>>> entry : logDirsByBrokerId.entrySet()) {
+    Map<Integer, KafkaFuture<Map<String, LogDirDescription>>> logDirsByBrokerId =
+        adminClient.describeLogDirs(cluster.nodes().stream().mapToInt(Node::id).boxed().collect(Collectors.toList())).descriptions();
+    for (Map.Entry<Integer, KafkaFuture<Map<String, LogDirDescription>>> entry : logDirsByBrokerId.entrySet()) {
       Integer brokerId = entry.getKey();
       try {
         entry.getValue().get(config.getLong(LOGDIR_RESPONSE_TIMEOUT_MS_CONFIG), TimeUnit.MILLISECONDS).forEach((logdir, info) -> {
-          if (info.error == Errors.NONE) {
-            for (Map.Entry<TopicPartition, DescribeLogDirsResponse.ReplicaInfo> e : info.replicaInfos.entrySet()) {
-              if (!e.getValue().isFuture) {
+          if (info.error() == null) {
+            for (Map.Entry<TopicPartition, ReplicaInfo> e : info.replicaInfos().entrySet()) {
+              if (!e.getValue().isFuture()) {
                 replicaPlacementInfo.putIfAbsent(e.getKey(), new HashMap<>());
                 replicaPlacementInfo.get(e.getKey()).put(brokerId, logdir);
               } else {
@@ -436,24 +410,42 @@ public class MonitorUtils {
    * @param valuesAndExtrapolations The values and extrapolations of the leader replica.
    * @param replicaPlacementInfo The distribution of replicas over broker logdirs if available, {@code null} otherwise.
    * @param brokerCapacityConfigResolver The resolver for retrieving broker capacities.
+   * @param allowCapacityEstimation whether allow capacity estimation in cluster model if the underlying live broker capacity is unavailable.
    */
   static void populatePartitionLoad(Cluster cluster,
                                     ClusterModel clusterModel,
                                     TopicPartition tp,
                                     ValuesAndExtrapolations valuesAndExtrapolations,
                                     Map<TopicPartition, Map<Integer, String>> replicaPlacementInfo,
-                                    BrokerCapacityConfigResolver brokerCapacityConfigResolver) {
+                                    BrokerCapacityConfigResolver brokerCapacityConfigResolver,
+                                    boolean allowCapacityEstimation)
+      throws TimeoutException {
     PartitionInfo partitionInfo = cluster.partition(tp);
     // If partition info does not exist, the topic may have been deleted.
     if (partitionInfo != null) {
+      Set<Integer> aliveBrokers = cluster.nodes().stream().mapToInt(Node::id).boxed().collect(Collectors.toSet());
       boolean needToAdjustCpuUsage = true;
+      Set<Integer> deadBrokersWithUnknownCapacity = new HashSet<>();
       for (int index = 0; index < partitionInfo.replicas().length; index++) {
         Node replica = partitionInfo.replicas()[index];
         String rack = getRackHandleNull(replica);
-        // Note that we assume the capacity resolver can still return the broker capacity even if the broker
-        // is dead. We need this to get the host resource capacity.
-        BrokerCapacityInfo brokerCapacity =
-            brokerCapacityConfigResolver.capacityForBroker(rack, replica.host(), replica.id());
+        BrokerCapacityInfo brokerCapacity;
+        try {
+          // Do not allow capacity estimation for dead brokers.
+          brokerCapacity = brokerCapacityConfigResolver.capacityForBroker(rack, replica.host(), replica.id(), BROKER_CAPACITY_FETCH_TIMEOUT_MS,
+                                                                          aliveBrokers.contains(replica.id()) && allowCapacityEstimation);
+        } catch (TimeoutException | BrokerCapacityResolutionException e) {
+          // Capacity resolver may not be able to return the capacity information of dead brokers.
+          if (!aliveBrokers.contains(replica.id())) {
+            brokerCapacity = new BrokerCapacityInfo(EMPTY_BROKER_CAPACITY);
+            deadBrokersWithUnknownCapacity.add(replica.id());
+          } else {
+            String errorMessage = String.format("Unable to retrieve capacity for broker %d. This may be caused by churn in "
+                                                + "the cluster, please retry.", replica.id());
+            LOG.warn(errorMessage, e);
+            throw new TimeoutException(errorMessage);
+          }
+        }
         clusterModel.handleDeadBroker(rack, replica.id(), brokerCapacity);
         boolean isLeader;
         if (partitionInfo.leader() == null) {
@@ -478,6 +470,10 @@ public class MonitorUtils {
                                                               needToAdjustCpuUsage),
                                     valuesAndExtrapolations.windows());
         needToAdjustCpuUsage = false;
+      }
+      if (!deadBrokersWithUnknownCapacity.isEmpty()) {
+        LOG.info("Assign empty capacity to brokers {} because they are dead and capacity resolver is unable to fetch their capacity.",
+                 deadBrokersWithUnknownCapacity);
       }
     }
   }

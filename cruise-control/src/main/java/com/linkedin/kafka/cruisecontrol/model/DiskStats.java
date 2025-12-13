@@ -6,7 +6,6 @@ package com.linkedin.kafka.cruisecontrol.model;
 
 import com.linkedin.kafka.cruisecontrol.servlet.response.JsonResponseField;
 import com.linkedin.kafka.cruisecontrol.servlet.response.JsonResponseClass;
-import java.util.HashMap;
 import java.util.Map;
 
 
@@ -37,35 +36,31 @@ public class DiskStats {
     _capacity = capacity;
   }
 
-  public int numLeaderReplicas()  {
+  public int numLeaderReplicas() {
     return _numLeaderReplicas;
   }
 
-  public int numReplicas()  {
+  public int numReplicas() {
     return _numReplicas;
   }
 
-  public Double utilization()  {
+  public Double utilization() {
     return _utilization;
   }
 
-  public double capacity()  {
+  public double capacity() {
     return _capacity;
   }
 
   public Double utilizationPercentage() {
-    return  _utilization == null ? null : _utilization * 100.0 / _capacity;
+    return _utilization == null ? null : _utilization * 100.0 / _capacity;
   }
 
   /**
    * @return An object that can be further used to encode into JSON.
    */
-  public Map<String, Object> getJSONStructure()   {
-    Map<String, Object> entry = new HashMap<>(4);
-    entry.put(DISK_MB, _utilization == null ? DEAD_STATE : _utilization);
-    entry.put(DISK_PCT, _utilization == null ? DEAD_STATE : utilizationPercentage());
-    entry.put(NUM_LEADER_REPLICAS, _numLeaderReplicas);
-    entry.put(NUM_REPLICAS, _numReplicas);
-    return entry;
+  public Map<String, Object> getJsonStructure() {
+    return Map.of(DISK_MB, _utilization == null ? DEAD_STATE : _utilization, DISK_PCT, _utilization == null ? DEAD_STATE : utilizationPercentage(),
+                  NUM_LEADER_REPLICAS, _numLeaderReplicas, NUM_REPLICAS, _numReplicas);
   }
 }

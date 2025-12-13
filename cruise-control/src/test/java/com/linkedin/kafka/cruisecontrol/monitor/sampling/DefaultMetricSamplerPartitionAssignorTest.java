@@ -21,16 +21,17 @@ import org.apache.kafka.common.record.RecordBatch;
 import org.apache.kafka.common.requests.MetadataResponse;
 import org.apache.kafka.common.utils.LogContext;
 import org.junit.Test;
-
 import java.util.Collections;
 import java.util.HashSet;
 import java.util.Random;
 import java.util.Set;
 
 import static com.linkedin.kafka.cruisecontrol.monitor.MonitorUnitTestUtils.METADATA_REFRESH_BACKOFF;
+import static com.linkedin.kafka.cruisecontrol.monitor.MonitorUnitTestUtils.METADATA_REFRESH_BACKOFF_MAX;
 import static com.linkedin.kafka.cruisecontrol.monitor.MonitorUnitTestUtils.METADATA_EXPIRY_MS;
 import static com.linkedin.kafka.cruisecontrol.monitor.MonitorUnitTestUtils.NODE_0;
 import static com.linkedin.kafka.cruisecontrol.monitor.MonitorUnitTestUtils.nodes;
+import static com.linkedin.kafka.cruisecontrol.monitor.MonitorUnitTestUtils.nodeIds;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertTrue;
 
@@ -62,11 +63,12 @@ public class DefaultMetricSamplerPartitionAssignorTest {
     }
     Cluster cluster = new Cluster("cluster", Arrays.asList(nodes()), partitions, Collections.emptySet(), Collections.emptySet());
     Metadata metadata = new Metadata(METADATA_REFRESH_BACKOFF,
+                                     METADATA_REFRESH_BACKOFF_MAX,
                                      METADATA_EXPIRY_MS,
                                      new LogContext(),
                                      new ClusterResourceListeners());
 
-    Map<String, Set<PartitionInfo>> topicToTopicPartitions = new HashMap<>(partitions.size());
+    Map<String, Set<PartitionInfo>> topicToTopicPartitions = new HashMap<>();
     for (PartitionInfo tp : partitions) {
       topicToTopicPartitions.putIfAbsent(tp.topic(), new HashSet<>());
       topicToTopicPartitions.get(tp.topic()).add(tp);
@@ -76,9 +78,11 @@ public class DefaultMetricSamplerPartitionAssignorTest {
     for (Map.Entry<String, Set<PartitionInfo>> entry : topicToTopicPartitions.entrySet()) {
       List<MetadataResponse.PartitionMetadata> partitionMetadata = new ArrayList<>(entry.getValue().size());
       for (PartitionInfo tp : entry.getValue()) {
-        partitionMetadata.add(new MetadataResponse.PartitionMetadata(Errors.NONE, tp.partition(), NODE_0,
+        partitionMetadata.add(new MetadataResponse.PartitionMetadata(Errors.NONE,
+                                                                     new TopicPartition(
+                                                                             tp.topic(), tp.partition()), Optional.of(NODE_0.id()),
                                                                      Optional.of(RecordBatch.NO_PARTITION_LEADER_EPOCH),
-                                                                     Arrays.asList(nodes()), Arrays.asList(nodes()),
+                                                                     nodeIds(), nodeIds(),
                                                                      Collections.emptyList()));
       }
       topicMetadata.add(new MetadataResponse.TopicMetadata(Errors.NONE, entry.getKey(), false, partitionMetadata));
@@ -88,8 +92,7 @@ public class DefaultMetricSamplerPartitionAssignorTest {
                                                                                         cluster.clusterResource().clusterId(),
                                                                                         MetadataResponse.NO_CONTROLLER_ID,
                                                                                         topicMetadata);
-    metadata.update(KafkaCruiseControlUtils.REQUEST_VERSION_UPDATE, metadataResponse, 0);
-
+    metadata.update(KafkaCruiseControlUtils.REQUEST_VERSION_UPDATE, metadataResponse, false, 0);
 
     MetricSamplerPartitionAssignor assignor = new DefaultMetricSamplerPartitionAssignor();
     Set<TopicPartition> assignment = assignor.assignPartitions(metadata.fetch());
@@ -108,11 +111,11 @@ public class DefaultMetricSamplerPartitionAssignorTest {
         totalNumPartitions, uniqueAssignedPartitions.size());
 
     int avgAssignedPartitionsPerFetcher = totalNumPartitions;
-    assertTrue("In the worst case the max number of partitions assigned to a metric fetchers should not differ by " +
-            "more than the partition number of the biggest topic, which is " + maxNumPartitionsForTopic,
+    assertTrue("In the worst case the max number of partitions assigned to a metric fetchers should not differ by "
+               + "more than the partition number of the biggest topic, which is " + maxNumPartitionsForTopic,
         maxAssignedNumPartitionsForFetcher - avgAssignedPartitionsPerFetcher <= maxNumPartitionsForTopic);
-    assertTrue("In the worst case the min number of partitions assigned to a metric fetchers should not differ by " +
-            "more than the partition number of the biggest topic, which is " + maxNumPartitionsForTopic,
+    assertTrue("In the worst case the min number of partitions assigned to a metric fetchers should not differ by "
+               + "more than the partition number of the biggest topic, which is " + maxNumPartitionsForTopic,
         avgAssignedPartitionsPerFetcher - minAssignedNumPartitionsForFetcher <= maxNumPartitionsForTopic);
   }
 }

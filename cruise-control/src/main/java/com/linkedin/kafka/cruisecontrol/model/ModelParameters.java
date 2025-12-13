@@ -8,10 +8,11 @@ import com.linkedin.kafka.cruisecontrol.config.KafkaCruiseControlConfig;
 import com.linkedin.kafka.cruisecontrol.config.constants.MonitorConfig;
 import com.linkedin.kafka.cruisecontrol.monitor.sampling.holder.BrokerMetricSample;
 import java.util.Collection;
+import javax.annotation.Nonnull;
 import org.apache.kafka.common.record.CompressionType;
 
 
-public class ModelParameters {
+public final class ModelParameters {
   // The linear regression model parameters.
   private static final LinearRegressionModelParameters LINEAR_REGRESSION_PARAMETERS = new LinearRegressionModelParameters();
 
@@ -19,15 +20,15 @@ public class ModelParameters {
   /**
    * The contribution weight of leader bytes in on the CPU utilization of a broker.
    */
-  static double CPU_WEIGHT_OF_LEADER_BYTES_IN_RATE = 0.7;
+  private static double cpuWeightOfLeaderBytesInRate = 0.7;
   /**
    * The contribution weight of leader bytes out on the CPU utilization of a broker.
    */
-  static double CPU_WEIGHT_OF_LEADER_BYTES_OUT_RATE = 0.15;
+  private static double cpuWeightOfLeaderBytesOutRate = 0.15;
   /**
    * The contribution weight of follower bytes in on the CPU utilization of a broker.
    */
-  static double CPU_WEIGHT_OF_FOLLOWER_BYTES_IN_RATE = 0.15;
+  private static double cpuWeightOfFollowerBytesInRate = 0.15;
 
   private ModelParameters() {
 
@@ -39,17 +40,26 @@ public class ModelParameters {
    * @param config The configurations for Cruise Control.
    */
   public static void init(KafkaCruiseControlConfig config) {
-    CPU_WEIGHT_OF_LEADER_BYTES_IN_RATE =
-        config.getDouble(MonitorConfig.LEADER_NETWORK_INBOUND_WEIGHT_FOR_CPU_UTIL_CONFIG);
-    CPU_WEIGHT_OF_LEADER_BYTES_OUT_RATE =
-        config.getDouble(MonitorConfig.LEADER_NETWORK_OUTBOUND_WEIGHT_FOR_CPU_UTIL_CONFIG);
-    CPU_WEIGHT_OF_FOLLOWER_BYTES_IN_RATE =
-        config.getDouble(MonitorConfig.FOLLOWER_NETWORK_INBOUND_WEIGHT_FOR_CPU_UTIL_CONFIG);
-    LINEAR_REGRESSION_PARAMETERS.init(config);
+    cpuWeightOfLeaderBytesInRate = config.getDouble(MonitorConfig.LEADER_NETWORK_INBOUND_WEIGHT_FOR_CPU_UTIL_CONFIG);
+    cpuWeightOfLeaderBytesOutRate = config.getDouble(MonitorConfig.LEADER_NETWORK_OUTBOUND_WEIGHT_FOR_CPU_UTIL_CONFIG);
+    cpuWeightOfFollowerBytesInRate = config.getDouble(MonitorConfig.FOLLOWER_NETWORK_INBOUND_WEIGHT_FOR_CPU_UTIL_CONFIG);
+    LinearRegressionModelParameters.init(config);
   }
 
   public static Double getCoefficient(LinearRegressionModelParameters.ModelCoefficient name) {
     return LINEAR_REGRESSION_PARAMETERS.getCoefficient(name);
+  }
+
+  public static double cpuWeightOfLeaderBytesInRate() {
+    return cpuWeightOfLeaderBytesInRate;
+  }
+
+  public static double cpuWeightOfLeaderBytesOutRate() {
+    return cpuWeightOfLeaderBytesOutRate;
+  }
+
+  public static double cpuWeightOfFollowerBytesInRate() {
+    return cpuWeightOfFollowerBytesInRate;
   }
 
   public static boolean trainingCompleted() {
@@ -62,7 +72,7 @@ public class ModelParameters {
 
   /**
    * Trigger the calculation of the model parameters.
-   * @return True if the parameters are generated, otherwise false;
+   * @return {@code true} if the parameters are generated, otherwise false;
    */
   public static boolean updateModelCoefficient() {
     return LINEAR_REGRESSION_PARAMETERS.updateModelCoefficient();
@@ -72,6 +82,7 @@ public class ModelParameters {
     LINEAR_REGRESSION_PARAMETERS.addMetricObservation(trainingData);
   }
 
+  @Nonnull
   public static LinearRegressionModelParameters.LinearRegressionModelState linearRegressionModelState() {
     return LINEAR_REGRESSION_PARAMETERS.modelState();
   }

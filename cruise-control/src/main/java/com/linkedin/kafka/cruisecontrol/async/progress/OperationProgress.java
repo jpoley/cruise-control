@@ -8,7 +8,6 @@ import com.linkedin.kafka.cruisecontrol.servlet.response.JsonResponseField;
 import com.linkedin.kafka.cruisecontrol.servlet.response.JsonResponseClass;
 import java.util.ArrayList;
 import java.util.Collections;
-import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import javax.servlet.http.HttpSession;
@@ -31,7 +30,7 @@ public class OperationProgress {
   private List<Long> _startTimes = new ArrayList<>();
   private final String _operation;
 
-  public  OperationProgress() {
+  public OperationProgress() {
     this("");
   }
 
@@ -96,19 +95,36 @@ public class OperationProgress {
     for (int i = 0; i < _steps.size(); i++) {
       OperationStep step = _steps.get(i);
       long time = (i == _steps.size() - 1 ? System.currentTimeMillis() : _startTimes.get(i + 1)) - _startTimes.get(i);
-      sb.append(new StepProgress(step, time).toString());
+      sb.append(new StepProgress(step, time));
     }
     return sb.toString();
+  }
+
+  /**
+   * @return the up-to-date total execution time on the progress
+   */
+  public synchronized long getCurrentTotalExecutionTimeMs() {
+    if (_startTimes.isEmpty()) {
+      return 0;
+    } else {
+      long currentTime = System.currentTimeMillis();
+      long startTime = _startTimes.get(0);
+      return currentTime - startTime;
+    }
+  }
+
+  /**
+   * @return the name of the operation
+   */
+  public String getOperation() {
+    return _operation;
   }
 
   /**
    * @return The map describing the progress of the operation.
    */
   public Map<String, Object> getJsonStructure() {
-    Map<String, Object> operationProgress = new HashMap<>(2);
-    operationProgress.put(OPERATION, _operation);
-    operationProgress.put(OPERATION_PROGRESS, getProgress());
-    return operationProgress;
+    return Map.of(OPERATION, _operation, OPERATION_PROGRESS, getProgress());
   }
 
   private synchronized Object[] getProgress() {

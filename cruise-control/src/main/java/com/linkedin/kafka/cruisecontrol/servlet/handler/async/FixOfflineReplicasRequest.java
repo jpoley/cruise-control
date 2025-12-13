@@ -10,6 +10,7 @@ import com.linkedin.kafka.cruisecontrol.servlet.parameters.FixOfflineReplicasPar
 import java.util.Map;
 
 import static com.linkedin.kafka.cruisecontrol.servlet.parameters.ParameterUtils.FIX_OFFLINE_REPLICAS_PARAMETER_OBJECT_CONFIG;
+import static com.linkedin.cruisecontrol.common.utils.Utils.validateNotNull;
 
 
 public class FixOfflineReplicasRequest extends AbstractAsyncRequest {
@@ -23,7 +24,7 @@ public class FixOfflineReplicasRequest extends AbstractAsyncRequest {
   protected OperationFuture handle(String uuid) {
     OperationFuture future = new OperationFuture("Fix offline replicas");
     pending(future.operationProgress());
-    _asyncKafkaCruiseControl.sessionExecutor().submit(new FixOfflineReplicasRunnable(_asyncKafkaCruiseControl, future, _parameters, uuid));
+    _asyncKafkaCruiseControl.sessionExecutor().execute(new FixOfflineReplicasRunnable(_asyncKafkaCruiseControl, future, _parameters, uuid));
     return future;
   }
 
@@ -40,9 +41,7 @@ public class FixOfflineReplicasRequest extends AbstractAsyncRequest {
   @Override
   public void configure(Map<String, ?> configs) {
     super.configure(configs);
-    _parameters = (FixOfflineReplicasParameters) configs.get(FIX_OFFLINE_REPLICAS_PARAMETER_OBJECT_CONFIG);
-    if (_parameters == null) {
-      throw new IllegalArgumentException("Parameter configuration is missing from the request.");
-    }
+    _parameters = (FixOfflineReplicasParameters) validateNotNull(configs.get(FIX_OFFLINE_REPLICAS_PARAMETER_OBJECT_CONFIG),
+            "Parameter configuration is missing from the request.");
   }
 }

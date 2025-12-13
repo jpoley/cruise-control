@@ -6,16 +6,16 @@ plugins {
 
 repositories {
   mavenLocal()
-  jcenter()
+  mavenCentral()
 }
 
 dependencies {
-  compile gradleApi()
-  compile localGroovy()
+  implementation gradleApi()
+  implementation localGroovy()
 
-  compile 'org.ajoberstar:gradle-git:1.7.2'
-  compile group: 'org.apache.httpcomponents', name: 'fluent-hc', version: '4.5.8'
-  compile('org.jfrog.buildinfo:build-info-extractor-gradle:4.9.5') {
+  implementation 'org.ajoberstar:grgit:1.7.2'
+  implementation 'org.apache.httpcomponents:fluent-hc:4.5.13'
+  implementation('org.jfrog.buildinfo:build-info-extractor-gradle:4.24.14') {
     exclude module: 'groovy-all'
   }
 }

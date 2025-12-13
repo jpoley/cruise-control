@@ -5,7 +5,6 @@
 package com.linkedin.kafka.cruisecontrol.detector;
 
 import com.linkedin.cruisecontrol.detector.Anomaly;
-import java.util.Arrays;
 import java.util.Collections;
 import java.util.List;
 
@@ -74,14 +73,14 @@ public class AnomalyState {
   public enum Status {
     DETECTED, IGNORED, FIX_STARTED, FIX_FAILED_TO_START, CHECK_WITH_DELAY, LOAD_MONITOR_NOT_READY, COMPLETENESS_NOT_READY;
 
-    private static final List<Status> CACHED_VALUES = Collections.unmodifiableList(Arrays.asList(values()));
+    private static final List<Status> CACHED_VALUES = List.of(values());
 
     /**
      * Use this instead of values() because values() creates a new array each time.
      * @return enumerated values in the same order as values()
      */
     public static List<Status> cachedValues() {
-      return CACHED_VALUES;
+      return Collections.unmodifiableList(CACHED_VALUES);
     }
   }
 }

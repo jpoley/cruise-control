@@ -19,9 +19,10 @@ import org.apache.commons.math3.stat.descriptive.rank.Percentile;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import static com.linkedin.cruisecontrol.CruiseControlUtils.toPrettyTime;
+import static com.linkedin.cruisecontrol.CruiseControlUtils.utcDateFor;
 import static com.linkedin.cruisecontrol.detector.metricanomaly.PercentileMetricAnomalyFinderUtils.isDataSufficient;
 import static com.linkedin.cruisecontrol.detector.metricanomaly.PercentileMetricAnomalyFinderUtils.SIGNIFICANT_METRIC_VALUE_THRESHOLD;
+import static com.linkedin.cruisecontrol.common.utils.Utils.validateNotNull;
 
 
 /**
@@ -42,9 +43,11 @@ public abstract class PercentileMetricAnomalyFinder<E extends Entity> implements
   protected Double _anomalyUpperPercentile;
   protected Double _anomalyLowerPercentile;
   protected Set<String> _interestedMetrics;
+  protected int _numRecentAnomalies;
 
   public PercentileMetricAnomalyFinder() {
     _percentile = new Percentile();
+    _numRecentAnomalies = 0;
   }
 
   /**
@@ -110,14 +113,15 @@ public abstract class PercentileMetricAnomalyFinder<E extends Entity> implements
     int numHistoryWindows = historyWindows.size();
     return String.format("Metric value %.3f of %s for %s in window %s is out of the normal range for percentile: [%.2f, %.2f] "
                          + "(value: [%.3f, %.3f] with margins (lower: %.3f, upper: %.3f)) in %d history windows from %s to %s.",
-                         currentMetricValue, toMetricName(metricId), entity, toPrettyTime(currentWindow),
+                         currentMetricValue, toMetricName(metricId), entity, utcDateFor(currentWindow),
                          _anomalyLowerPercentile, _anomalyUpperPercentile, lowerThreshold, upperThreshold,
                          _anomalyLowerMargin, _anomalyUpperMargin, numHistoryWindows,
-                         toPrettyTime(historyWindows.get(0)), toPrettyTime(historyWindows.get(numHistoryWindows - 1)));
+                         utcDateFor(historyWindows.get(0)), utcDateFor(historyWindows.get(numHistoryWindows - 1)));
   }
 
   /**
-   * Get the metric name from metric id.
+   * @param metricId Metric id.
+   * @return the metric name from metric id.
    */
   protected abstract String toMetricName(Short metricId);
 
@@ -136,13 +140,11 @@ public abstract class PercentileMetricAnomalyFinder<E extends Entity> implements
   public Collection<MetricAnomaly<E>> metricAnomalies(Map<E, ValuesAndExtrapolations> metricsHistoryByEntity,
                                                       Map<E, ValuesAndExtrapolations> currentMetricsByEntity) {
 
-    if (metricsHistoryByEntity == null || currentMetricsByEntity == null) {
-      throw new IllegalArgumentException("Metrics history or current metrics cannot be null.");
-    }
+    validateNotNull(metricsHistoryByEntity, "Metrics history cannot be null.");
+    validateNotNull(currentMetricsByEntity, "Current metrics cannot be null.");
 
-    if (metricsHistoryByEntity.isEmpty() ||
-        !isDataSufficient(metricsHistoryByEntity.values().iterator().next().metricValues().length(),
-                          _anomalyUpperPercentile, _anomalyLowerPercentile)) {
+    if (metricsHistoryByEntity.isEmpty() || !isDataSufficient(metricsHistoryByEntity.values().iterator().next().metricValues().length(),
+                                                              _anomalyUpperPercentile, _anomalyLowerPercentile)) {
       return Collections.emptySet();
     }
 
@@ -170,7 +172,14 @@ public abstract class PercentileMetricAnomalyFinder<E extends Entity> implements
       }
     }
 
+    _numRecentAnomalies = metricAnomalies.size();
     return metricAnomalies;
+  }
+
+  @Override
+  public int numAnomaliesOfType(MetricAnomalyType type) {
+    // Percentile Metric Anomaly Finder can only report the recent number of metric anomalies.
+    return type != MetricAnomalyType.RECENT ? 0 : _numRecentAnomalies;
   }
 
   @Override

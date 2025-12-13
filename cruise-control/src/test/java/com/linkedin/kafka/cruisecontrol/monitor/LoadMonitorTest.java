@@ -14,9 +14,8 @@ import com.linkedin.kafka.cruisecontrol.common.MetadataClient;
 import com.linkedin.kafka.cruisecontrol.common.Resource;
 import com.linkedin.kafka.cruisecontrol.config.BrokerCapacityConfigFileResolver;
 import com.linkedin.kafka.cruisecontrol.config.KafkaCruiseControlConfig;
-import com.linkedin.kafka.cruisecontrol.config.constants.ExecutorConfig;
 import com.linkedin.kafka.cruisecontrol.config.constants.MonitorConfig;
-import com.linkedin.kafka.cruisecontrol.executor.Executor;
+import com.linkedin.kafka.cruisecontrol.exception.BrokerCapacityResolutionException;
 import com.linkedin.kafka.cruisecontrol.model.ClusterModel;
 import com.linkedin.kafka.cruisecontrol.model.ModelParameters;
 import com.linkedin.kafka.cruisecontrol.monitor.metricdefinition.KafkaMetricDef;
@@ -24,30 +23,38 @@ import com.linkedin.kafka.cruisecontrol.monitor.sampling.NoopSampleStore;
 import com.linkedin.kafka.cruisecontrol.monitor.sampling.holder.PartitionEntity;
 import com.linkedin.kafka.cruisecontrol.monitor.sampling.aggregator.KafkaPartitionMetricSampleAggregator;
 import com.linkedin.kafka.cruisecontrol.monitor.task.LoadMonitorTaskRunner;
-import java.lang.reflect.Constructor;
-import java.lang.reflect.InvocationTargetException;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.Properties;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.TimeoutException;
+import java.util.concurrent.TimeUnit;
 import org.apache.kafka.clients.Metadata;
 import org.apache.kafka.clients.admin.AdminClient;
+import org.apache.kafka.clients.admin.Config;
+import org.apache.kafka.clients.admin.ConfigEntry;
+import org.apache.kafka.clients.admin.DescribeConfigsResult;
 import org.apache.kafka.clients.admin.DescribeLogDirsResult;
+import org.apache.kafka.clients.admin.LogDirDescription;
+import org.apache.kafka.clients.admin.ReplicaInfo;
 import org.apache.kafka.common.KafkaFuture;
 import org.apache.kafka.common.TopicPartition;
-import org.apache.kafka.common.protocol.Errors;
-import org.apache.kafka.common.requests.DescribeLogDirsResponse;
+import org.apache.kafka.common.config.ConfigResource;
 import org.apache.kafka.common.utils.MockTime;
 import org.apache.kafka.common.utils.Time;
+import org.apache.kafka.common.config.TopicConfig;
 import org.easymock.EasyMock;
 import org.junit.Test;
 
+import static com.linkedin.kafka.cruisecontrol.KafkaCruiseControlUnitTestUtils.waitUntilTrue;
+import static com.linkedin.kafka.cruisecontrol.KafkaCruiseControlUtils.CLUSTER_CONFIG;
 import static com.linkedin.kafka.cruisecontrol.common.TestConstants.TOPIC0;
 import static com.linkedin.kafka.cruisecontrol.common.TestConstants.TOPIC1;
 import static com.linkedin.kafka.cruisecontrol.monitor.MonitorUnitTestUtils.getMetadata;
-import static com.linkedin.kafka.cruisecontrol.executor.ExecutorState.noTaskInProgress;
 import static com.linkedin.kafka.cruisecontrol.servlet.parameters.ParameterUtils.DEFAULT_START_TIME_FOR_CLUSTER_MODEL;
+import static com.linkedin.kafka.cruisecontrol.servlet.response.ClusterPartitionState.MIN_INSYNC_REPLICAS;
 import static org.apache.kafka.common.KafkaFuture.completedFuture;
 import static org.easymock.EasyMock.*;
 import static org.junit.Assert.assertEquals;
@@ -56,9 +63,6 @@ import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertTrue;
 import static org.junit.Assert.fail;
-import static kafka.log.LogConfig.CleanupPolicyProp;
-
-
 /**
  * Unit test for LoadMonitor
  */
@@ -77,10 +81,13 @@ public class LoadMonitorTest {
 
   private static final int NUM_WINDOWS = 2;
   private static final int MIN_SAMPLES_PER_WINDOW = 4;
-  private static final long WINDOW_MS = 1000;
+  private static final long WINDOW_MS = TimeUnit.SECONDS.toMillis(1);
   private static final String DEFAULT_CLEANUP_POLICY = "delete";
-
-  private final Time _time = new MockTime(0);
+  private static final long WAIT_DEADLINE_MS = TimeUnit.SECONDS.toMillis(30);
+  private static final long CHECK_MS = 10L;
+  private static final long MONITOR_STATE_UPDATE_INTERVAL_MS = 100L;
+  private static final long START_TIME_MS = 100L;
+  private Time _time;
 
   @Test
   public void testStateWithOnlyActiveSnapshotWindow() {
@@ -96,7 +103,8 @@ public class LoadMonitorTest {
     CruiseControlUnitTestUtils.populateSampleAggregator(1, 4, aggregator, PE_T1P1, 0, WINDOW_MS, METRIC_DEF);
 
     MetadataClient.ClusterAndGeneration clusterAndGeneration = loadMonitor.refreshClusterAndGeneration();
-    LoadMonitorState state = loadMonitor.state(new OperationProgress(), clusterAndGeneration.cluster());
+    waitForStateUpdate(loadMonitor);
+    LoadMonitorState state = loadMonitor.state(clusterAndGeneration.cluster());
     // The load monitor only has an active window. There is no stable window.
     assertEquals(0, state.numValidPartitions());
     assertEquals(0, state.numValidWindows());
@@ -115,10 +123,11 @@ public class LoadMonitorTest {
     CruiseControlUnitTestUtils.populateSampleAggregator(2, 4, aggregator, PE_T0P1, 0, WINDOW_MS, METRIC_DEF);
     CruiseControlUnitTestUtils.populateSampleAggregator(2, 4, aggregator, PE_T1P0, 0, WINDOW_MS, METRIC_DEF);
 
+    waitForStateUpdate(loadMonitor);
     MetadataClient.ClusterAndGeneration clusterAndGeneration = loadMonitor.refreshClusterAndGeneration();
-    LoadMonitorState state = loadMonitor.state(new OperationProgress(), clusterAndGeneration.cluster());
-    // The load monitor has 1 stable window with 0.5 of valid partitions ratio.
-    assertEquals(0, state.numValidPartitions());
+    LoadMonitorState state = loadMonitor.state(clusterAndGeneration.cluster());
+    // The load monitor has 1 stable window with 0.5 of valid partitions ratio. Partitions with samples on stable window are valid.
+    assertEquals(3, state.numValidPartitions());
     assertEquals(0, state.numValidWindows());
     assertEquals(1, state.monitoredWindows().size());
     assertEquals(0.5, state.monitoredWindows().get(WINDOW_MS), 0.0);
@@ -126,9 +135,11 @@ public class LoadMonitorTest {
     // Back fill for T1P1
     CruiseControlUnitTestUtils.populateSampleAggregator(1, 1, aggregator, PE_T1P1, 0, WINDOW_MS, METRIC_DEF);
     clusterAndGeneration = loadMonitor.refreshClusterAndGeneration();
-    state = loadMonitor.state(new OperationProgress(), clusterAndGeneration.cluster());
+
+    waitForStateUpdate(loadMonitor);
+    state = loadMonitor.state(clusterAndGeneration.cluster());
     // The load monitor now has one stable window with 1.0 of valid partitions ratio.
-    assertEquals(0, state.numValidPartitions());
+    assertEquals(4, state.numValidPartitions());
     assertEquals(1, state.numValidWindows());
     assertEquals(1, state.monitoredWindows().size());
     assertEquals(1.0, state.monitoredWindows().get(WINDOW_MS), 0.0);
@@ -141,34 +152,34 @@ public class LoadMonitorTest {
     KafkaPartitionMetricSampleAggregator aggregator = context.aggregator();
 
     // populate the metrics aggregator.
-    // four samples for each partition except T1P1. T1P1 has 2 samples in the first window, and 2 samples in the
-    // active window.
+    // four samples for each partition except T1P1. T1P1 has 2 samples in the active window.
     CruiseControlUnitTestUtils.populateSampleAggregator(3, 4, aggregator, PE_T0P0, 0, WINDOW_MS, METRIC_DEF);
     CruiseControlUnitTestUtils.populateSampleAggregator(3, 4, aggregator, PE_T0P1, 0, WINDOW_MS, METRIC_DEF);
     CruiseControlUnitTestUtils.populateSampleAggregator(3, 4, aggregator, PE_T1P0, 0, WINDOW_MS, METRIC_DEF);
-    CruiseControlUnitTestUtils.populateSampleAggregator(1, 2, aggregator, PE_T1P1, 0, WINDOW_MS, METRIC_DEF);
     CruiseControlUnitTestUtils.populateSampleAggregator(1, 2, aggregator, PE_T1P1, 2, WINDOW_MS, METRIC_DEF);
 
     MetadataClient.ClusterAndGeneration clusterAndGeneration = loadMonitor.refreshClusterAndGeneration();
-    LoadMonitorState state = loadMonitor.state(new OperationProgress(), clusterAndGeneration.cluster());
-    // Both partitions for topic 0 should be valid.
+    waitForStateUpdate(loadMonitor);
+    LoadMonitorState state = loadMonitor.state(clusterAndGeneration.cluster());
+    // Partitions with samples on stable window are valid.
     assertEquals(3, state.numValidPartitions());
-    // Both topic should be valid in the first window.
-    assertEquals(1, state.numValidWindows());
+    // Only TOPIC0 is valid in both stable windows. Hence, this makes both windows invalid.
+    assertEquals(0, state.numValidWindows());
     // There should be 2 monitored windows.
     assertEquals(2, state.monitoredWindows().size());
-    // Both topic should be valid in the first window.
-    assertEquals(1.0, state.monitoredWindows().get(WINDOW_MS), 0.0);
-    // Only topic 2 is valid in the second window.
+    // In both windows, 50% of topics is valid -- i.e. TOPIC0 is valid, but not TOPIC1.
+    assertEquals(0.5, state.monitoredWindows().get(WINDOW_MS), 0.0);
     assertEquals(0.5, state.monitoredWindows().get(WINDOW_MS * 2), 0.0);
 
-    // Back fill 3 samples for T1P1 in the second window.
+    // Back fill 3 samples for T1P1 in the second window, and 2 samples in the first window.
+    CruiseControlUnitTestUtils.populateSampleAggregator(1, 2, aggregator, PE_T1P1, 0, WINDOW_MS, METRIC_DEF);
     CruiseControlUnitTestUtils.populateSampleAggregator(1, 3, aggregator, PE_T1P1, 1, WINDOW_MS, METRIC_DEF);
     clusterAndGeneration = loadMonitor.refreshClusterAndGeneration();
-    state = loadMonitor.state(new OperationProgress(), clusterAndGeneration.cluster());
+    waitForStateUpdate(loadMonitor);
+    state = loadMonitor.state(clusterAndGeneration.cluster());
     // All the partitions should be valid now.
     assertEquals(4, state.numValidPartitions());
-    // All the windows should be valid now.
+    // All the windows should be valid now, because window 0 and 1 have been back filled for PE_T1P1.
     assertEquals(2, state.numValidWindows());
     // There should be two monitored windows.
     assertEquals(2, state.monitoredWindows().size());
@@ -237,7 +248,20 @@ public class LoadMonitorTest {
 
   // Test the case with enough snapshot windows and valid partitions.
   @Test
-  public void testBasicClusterModel() throws NotEnoughValidWindowsException {
+  public void testBasicClusterModelWithCapacityEstimationAllowed()
+      throws NotEnoughValidWindowsException, TimeoutException, BrokerCapacityResolutionException {
+    testBasicClusterModel(true);
+  }
+
+  // Test the case that broker capacity resolver is not allowed to estimate broker capacity.
+  @Test(expected = BrokerCapacityResolutionException.class)
+  public void testBasicClusterModelWithCapacityEstimationNotAllowed()
+      throws NotEnoughValidWindowsException, TimeoutException, BrokerCapacityResolutionException {
+    testBasicClusterModel(false);
+  }
+
+  private void testBasicClusterModel(boolean allowCapacityEstimation)
+      throws NotEnoughValidWindowsException, TimeoutException, BrokerCapacityResolutionException {
     TestContext context = prepareContext();
     LoadMonitor loadMonitor = context.loadmonitor();
     KafkaPartitionMetricSampleAggregator aggregator = context.aggregator();
@@ -249,6 +273,7 @@ public class LoadMonitorTest {
 
     ClusterModel clusterModel = loadMonitor.clusterModel(-1, Long.MAX_VALUE,
                                                          new ModelCompletenessRequirements(2, 1.0, false),
+                                                         allowCapacityEstimation,
                                                          new OperationProgress());
     assertEquals(6.5, clusterModel.partition(T0P0).leader().load().expectedUtilizationFor(Resource.CPU), 0.0);
     assertEquals(13, clusterModel.partition(T0P0).leader().load().expectedUtilizationFor(Resource.NW_IN), 0.0);
@@ -258,7 +283,7 @@ public class LoadMonitorTest {
 
   // Test build cluster model for JBOD broker.
   @Test
-  public void testJBODClusterModel() throws NotEnoughValidWindowsException {
+  public void testJbodClusterModel() throws NotEnoughValidWindowsException, TimeoutException, BrokerCapacityResolutionException {
     TestContext context = prepareContext(NUM_WINDOWS, true);
     LoadMonitor loadMonitor = context.loadmonitor();
     KafkaPartitionMetricSampleAggregator aggregator = context.aggregator();
@@ -270,6 +295,7 @@ public class LoadMonitorTest {
 
     ClusterModel clusterModel = loadMonitor.clusterModel(DEFAULT_START_TIME_FOR_CLUSTER_MODEL, Long.MAX_VALUE,
                                                          new ModelCompletenessRequirements(2, 1.0, false),
+                                                         true,
                                                          true,
                                                          new OperationProgress());
 
@@ -285,7 +311,7 @@ public class LoadMonitorTest {
   // Not enough snapshot windows and some partitions are missing from all snapshot windows.
   @Test
   public void testClusterModelWithInvalidPartitionAndInsufficientSnapshotWindows()
-      throws NotEnoughValidWindowsException {
+      throws NotEnoughValidWindowsException, TimeoutException, BrokerCapacityResolutionException {
     TestContext context = prepareContext();
     LoadMonitor loadMonitor = context.loadmonitor();
     KafkaPartitionMetricSampleAggregator aggregator = context.aggregator();
@@ -302,13 +328,13 @@ public class LoadMonitorTest {
     CruiseControlUnitTestUtils.populateSampleAggregator(2, 4, aggregator, PE_T1P0, 0, WINDOW_MS, METRIC_DEF);
 
     try {
-      loadMonitor.clusterModel(-1, Long.MAX_VALUE, requirements1, new OperationProgress());
+      loadMonitor.clusterModel(-1, Long.MAX_VALUE, requirements1, true, new OperationProgress());
       fail("Should have thrown NotEnoughValidWindowsException.");
     } catch (NotEnoughValidWindowsException nevwe) {
       // let it go
     }
 
-    ClusterModel clusterModel = loadMonitor.clusterModel(-1L, Long.MAX_VALUE, requirements2, new OperationProgress());
+    ClusterModel clusterModel = loadMonitor.clusterModel(-1L, Long.MAX_VALUE, requirements2, true, new OperationProgress());
     assertNotNull(clusterModel.partition(T1P0));
     assertNull(clusterModel.partition(T1P1));
     assertEquals(1, clusterModel.partition(T0P0).leader().load().numWindows());
@@ -318,14 +344,14 @@ public class LoadMonitorTest {
     assertEquals(3.0, clusterModel.partition(T0P0).leader().load().expectedUtilizationFor(Resource.NW_OUT), 0.0);
 
     try {
-      loadMonitor.clusterModel(-1L, Long.MAX_VALUE, requirements3, new OperationProgress());
+      loadMonitor.clusterModel(-1L, Long.MAX_VALUE, requirements3, true, new OperationProgress());
       fail("Should have thrown NotEnoughValidWindowsException.");
     } catch (NotEnoughValidWindowsException nevwe) {
       // let it go
     }
 
     try {
-      loadMonitor.clusterModel(-1L, Long.MAX_VALUE, requirements4, new OperationProgress());
+      loadMonitor.clusterModel(-1L, Long.MAX_VALUE, requirements4, true, new OperationProgress());
       fail("Should have thrown NotEnoughValidWindowsException.");
     } catch (NotEnoughValidWindowsException nevwe) {
       // let it go
@@ -334,7 +360,7 @@ public class LoadMonitorTest {
 
   // Enough snapshot windows, some partitions are invalid in all snapshot windows.
   @Test
-  public void testClusterWithInvalidPartitions() throws NotEnoughValidWindowsException {
+  public void testClusterWithInvalidPartitions() throws NotEnoughValidWindowsException, TimeoutException, BrokerCapacityResolutionException {
     TestContext context = prepareContext();
     LoadMonitor loadMonitor = context.loadmonitor();
     KafkaPartitionMetricSampleAggregator aggregator = context.aggregator();
@@ -351,13 +377,13 @@ public class LoadMonitorTest {
     CruiseControlUnitTestUtils.populateSampleAggregator(3, 4, aggregator, PE_T1P0, 0, WINDOW_MS, METRIC_DEF);
 
     try {
-      loadMonitor.clusterModel(-1, Long.MAX_VALUE, requirements1, new OperationProgress());
+      loadMonitor.clusterModel(-1, Long.MAX_VALUE, requirements1, true, new OperationProgress());
       fail("Should have thrown NotEnoughValidWindowsException.");
     } catch (NotEnoughValidWindowsException nevwe) {
       // let it go
     }
 
-    ClusterModel clusterModel = loadMonitor.clusterModel(-1L, Long.MAX_VALUE, requirements2, new OperationProgress());
+    ClusterModel clusterModel = loadMonitor.clusterModel(-1L, Long.MAX_VALUE, requirements2, true, new OperationProgress());
     assertNotNull(clusterModel.partition(T1P0));
     assertNull(clusterModel.partition(T1P1));
     assertEquals(2, clusterModel.partition(T0P0).leader().load().numWindows());
@@ -367,13 +393,13 @@ public class LoadMonitorTest {
     assertEquals(13, clusterModel.partition(T0P0).leader().load().expectedUtilizationFor(Resource.NW_OUT), 0.0);
 
     try {
-      loadMonitor.clusterModel(-1L, Long.MAX_VALUE, requirements3, new OperationProgress());
+      loadMonitor.clusterModel(-1L, Long.MAX_VALUE, requirements3, true, new OperationProgress());
       fail("Should have thrown NotEnoughValidWindowsException.");
     } catch (NotEnoughValidWindowsException nevwe) {
       // let it go
     }
 
-    clusterModel = loadMonitor.clusterModel(-1L, Long.MAX_VALUE, requirements4, new OperationProgress());
+    clusterModel = loadMonitor.clusterModel(-1L, Long.MAX_VALUE, requirements4, true, new OperationProgress());
     assertNotNull(clusterModel.partition(T1P0));
     assertNull(clusterModel.partition(T1P1));
     assertEquals(2, clusterModel.partition(T0P0).leader().load().numWindows());
@@ -385,7 +411,8 @@ public class LoadMonitorTest {
 
   // Enough snapshot windows, some partitions are not available in some snapshot windows.
   @Test
-  public void testClusterModelWithPartlyInvalidPartitions() throws NotEnoughValidWindowsException {
+  public void testClusterModelWithPartlyInvalidPartitions()
+      throws NotEnoughValidWindowsException, TimeoutException, BrokerCapacityResolutionException {
     TestContext context = prepareContext();
     LoadMonitor loadMonitor = context.loadmonitor();
     KafkaPartitionMetricSampleAggregator aggregator = context.aggregator();
@@ -402,7 +429,7 @@ public class LoadMonitorTest {
     CruiseControlUnitTestUtils.populateSampleAggregator(3, 4, aggregator, PE_T1P0, 0, WINDOW_MS, METRIC_DEF);
     CruiseControlUnitTestUtils.populateSampleAggregator(1, 1, aggregator, PE_T1P1, 1, WINDOW_MS, METRIC_DEF);
 
-    ClusterModel clusterModel =  loadMonitor.clusterModel(-1, Long.MAX_VALUE, requirements1, new OperationProgress());
+    ClusterModel clusterModel = loadMonitor.clusterModel(-1, Long.MAX_VALUE, requirements1, true, new OperationProgress());
     for (TopicPartition tp : Arrays.asList(T0P0, T0P1, T1P0, T1P1)) {
       assertNotNull(clusterModel.partition(tp));
     }
@@ -417,7 +444,7 @@ public class LoadMonitorTest {
     assertEquals(20, clusterModel.partition(T1P1).leader().load().expectedUtilizationFor(Resource.NW_IN), 0.0);
     assertEquals(20, clusterModel.partition(T1P1).leader().load().expectedUtilizationFor(Resource.NW_OUT), 0.0);
 
-    clusterModel = loadMonitor.clusterModel(-1L, Long.MAX_VALUE, requirements2, new OperationProgress());
+    clusterModel = loadMonitor.clusterModel(-1L, Long.MAX_VALUE, requirements2, true, new OperationProgress());
     assertNotNull(clusterModel.partition(T1P0));
     assertNull(clusterModel.partition(T1P1));
     assertEquals(2, clusterModel.partition(T0P0).leader().load().numWindows());
@@ -427,13 +454,13 @@ public class LoadMonitorTest {
     assertEquals(13.0, clusterModel.partition(T0P0).leader().load().expectedUtilizationFor(Resource.NW_OUT), 0.0);
 
     try {
-      loadMonitor.clusterModel(-1L, Long.MAX_VALUE, requirements3, new OperationProgress());
+      loadMonitor.clusterModel(-1L, Long.MAX_VALUE, requirements3, true, new OperationProgress());
       fail("Should have thrown NotEnoughValidWindowsException.");
     } catch (NotEnoughValidWindowsException nevwe) {
       // let it go
     }
 
-    clusterModel = loadMonitor.clusterModel(-1L, Long.MAX_VALUE, requirements4, new OperationProgress());
+    clusterModel = loadMonitor.clusterModel(-1L, Long.MAX_VALUE, requirements4, true, new OperationProgress());
     assertNotNull(clusterModel.partition(T1P0));
     assertNull(clusterModel.partition(T1P1));
     assertEquals(2, clusterModel.partition(T0P0).leader().load().numWindows());
@@ -444,7 +471,8 @@ public class LoadMonitorTest {
   }
 
   @Test
-  public void testClusterModelWithInvalidSnapshotWindows() throws NotEnoughValidWindowsException {
+  public void testClusterModelWithInvalidSnapshotWindows()
+      throws NotEnoughValidWindowsException, TimeoutException, BrokerCapacityResolutionException {
     TestContext context = prepareContext(4, false);
     LoadMonitor loadMonitor = context.loadmonitor();
     KafkaPartitionMetricSampleAggregator aggregator = context.aggregator();
@@ -465,8 +493,9 @@ public class LoadMonitorTest {
     CruiseControlUnitTestUtils.populateSampleAggregator(1, 4, aggregator, PE_T1P1, 4, WINDOW_MS, METRIC_DEF);
 
     ClusterModel clusterModel = loadMonitor.clusterModel(-1, Long.MAX_VALUE,
-        new ModelCompletenessRequirements(2, 0, false),
-        new OperationProgress());
+                                                         new ModelCompletenessRequirements(2, 0, false),
+                                                         true,
+                                                         new OperationProgress());
 
     assertEquals(2, clusterModel.partition(T0P0).leader().load().numWindows());
     assertEquals(16.5, clusterModel.partition(T0P0).leader().load().expectedUtilizationFor(Resource.CPU), 0.0);
@@ -501,22 +530,32 @@ public class LoadMonitorTest {
             .anyTimes();
     EasyMock.replay(mockMetadataClient);
 
+    // Create mock DescribeLogDirsResult
+    DescribeLogDirsResult mockDescribeLogDirsResult = EasyMock.mock(DescribeLogDirsResult.class);
+    EasyMock.expect(mockDescribeLogDirsResult.descriptions())
+            .andReturn(getDescribeLogDirsResultValues())
+            .anyTimes();
+    EasyMock.replay(mockDescribeLogDirsResult);
+
+    // Create mock DescribeConfigsResult
+    DescribeConfigsResult mockDescribeConfigsResult = EasyMock.mock(DescribeConfigsResult.class);
+    EasyMock.expect(mockDescribeConfigsResult.values())
+            .andReturn(getDescribeConfigsResultValues())
+            .anyTimes();
+    EasyMock.replay(mockDescribeConfigsResult);
+
     // Create mock admin client.
     AdminClient mockAdminClient = EasyMock.mock(AdminClient.class);
     EasyMock.expect(mockAdminClient.describeLogDirs(Arrays.asList(0, 1)))
-            .andReturn(getDescribeLogDirsResult())
+            .andReturn(mockDescribeLogDirsResult)
             .anyTimes();
     EasyMock.expect(mockAdminClient.describeLogDirs(Arrays.asList(1, 0)))
-            .andReturn(getDescribeLogDirsResult())
+            .andReturn(mockDescribeLogDirsResult)
+            .anyTimes();
+    EasyMock.expect(mockAdminClient.describeConfigs(Collections.singleton(CLUSTER_CONFIG)))
+            .andReturn(mockDescribeConfigsResult)
             .anyTimes();
     EasyMock.replay(mockAdminClient);
-
-    // Create mock executor.
-    Executor mockExecutor = EasyMock.mock(Executor.class);
-    EasyMock.expect(mockExecutor.state())
-            .andReturn(noTaskInProgress(null, null))
-            .anyTimes();
-    EasyMock.replay(mockExecutor);
 
     // Create load monitor.
     Properties props = KafkaCruiseControlUnitTestUtils.getKafkaCruiseControlProperties();
@@ -524,81 +563,79 @@ public class LoadMonitorTest {
     props.put(MonitorConfig.MIN_SAMPLES_PER_PARTITION_METRICS_WINDOW_CONFIG,
               Integer.toString(MIN_SAMPLES_PER_WINDOW));
     props.put(MonitorConfig.PARTITION_METRICS_WINDOW_MS_CONFIG, Long.toString(WINDOW_MS));
-    props.put(CleanupPolicyProp(), DEFAULT_CLEANUP_POLICY);
+    props.put(TopicConfig.CLEANUP_POLICY_CONFIG, DEFAULT_CLEANUP_POLICY);
     props.put(MonitorConfig.SAMPLE_STORE_CLASS_CONFIG, NoopSampleStore.class.getName());
-    props.put(ExecutorConfig.ZOOKEEPER_SECURITY_ENABLED_CONFIG, "false");
+    props.put(MonitorConfig.SAMPLE_PARTITION_METRIC_STORE_ON_EXECUTION_CLASS_CONFIG, NoopSampleStore.class.getName());
+    props.put(MonitorConfig.MONITOR_STATE_UPDATE_INTERVAL_MS_CONFIG, MONITOR_STATE_UPDATE_INTERVAL_MS);
     if (isClusterJBOD) {
       String capacityConfigFileJBOD =
           KafkaCruiseControlUnitTestUtils.class.getClassLoader().getResource("testCapacityConfigJBOD.json").getFile();
       props.setProperty(BrokerCapacityConfigFileResolver.CAPACITY_CONFIG_FILE, capacityConfigFileJBOD);
     }
     KafkaCruiseControlConfig config = new KafkaCruiseControlConfig(props);
-    LoadMonitor loadMonitor = new LoadMonitor(config, mockMetadataClient, mockAdminClient, _time, mockExecutor, new MetricRegistry(), METRIC_DEF);
+    _time = new MockTime(0, START_TIME_MS, TimeUnit.NANOSECONDS.convert(START_TIME_MS, TimeUnit.MILLISECONDS));
+    LoadMonitor loadMonitor = new LoadMonitor(config, mockMetadataClient, mockAdminClient, _time, new MetricRegistry(), METRIC_DEF);
 
     KafkaPartitionMetricSampleAggregator aggregator = loadMonitor.partitionSampleAggregator();
 
     ModelParameters.init(config);
     loadMonitor.startUp();
     MetadataClient.ClusterAndGeneration clusterAndGeneration = loadMonitor.refreshClusterAndGeneration();
-    while (loadMonitor.state(new OperationProgress(),
-                             clusterAndGeneration.cluster()).state() != LoadMonitorTaskRunner.LoadMonitorTaskRunnerState.RUNNING) {
-      try {
-        Thread.sleep(1);
-      } catch (InterruptedException e) {
-        // let it go.
-      }
-    }
+    waitUntilTrue(() -> (loadMonitor.state(clusterAndGeneration.cluster()).state() == LoadMonitorTaskRunner.LoadMonitorTaskRunnerState.RUNNING),
+                  "Load monitor state did not begin running.", WAIT_DEADLINE_MS, CHECK_MS);
 
-    return new TestContext(loadMonitor, aggregator, config, metadata);
+    return new TestContext(loadMonitor, aggregator);
   }
 
-  private DescribeLogDirsResult getDescribeLogDirsResult() {
+  private void waitForStateUpdate(LoadMonitor loadMonitor) {
+    _time.sleep(MONITOR_STATE_UPDATE_INTERVAL_MS + 1L);
+    waitUntilTrue(() -> (loadMonitor.lastUpdateMs() == _time.milliseconds()),
+                  "Load monitor state did not get updated within the time limit", WAIT_DEADLINE_MS, CHECK_MS);
+  }
+
+  private Map<ConfigResource, KafkaFuture<Config>> getDescribeConfigsResultValues() {
+    Config config = new Config(Collections.singleton(new ConfigEntry(MIN_INSYNC_REPLICAS, "2")));
+    KafkaFuture<Config> clusterConfigFuture = EasyMock.mock(KafkaFuture.class);
     try {
-      // Reflectively set DescribeLogDirsResult's constructor from package private to public.
-      Constructor<DescribeLogDirsResult> constructor = DescribeLogDirsResult.class.getDeclaredConstructor(Map.class);
-      constructor.setAccessible(true);
-
-      Map<Integer, KafkaFuture<Map<String, DescribeLogDirsResponse.LogDirInfo>>> futureByBroker = new HashMap<>();
-      Map<String, DescribeLogDirsResponse.LogDirInfo> logdirInfoBylogdir =  new HashMap<>();
-      Map<TopicPartition, DescribeLogDirsResponse.ReplicaInfo> replicaInfoByPartition = new HashMap<>();
-      replicaInfoByPartition.put(T0P0, new DescribeLogDirsResponse.ReplicaInfo(0, 0, false));
-      replicaInfoByPartition.put(T0P1, new DescribeLogDirsResponse.ReplicaInfo(0, 0, false));
-      replicaInfoByPartition.put(T1P0, new DescribeLogDirsResponse.ReplicaInfo(0, 0, false));
-      replicaInfoByPartition.put(T1P1, new DescribeLogDirsResponse.ReplicaInfo(0, 0, false));
-      logdirInfoBylogdir.put("/tmp/kafka-logs", new DescribeLogDirsResponse.LogDirInfo(Errors.NONE, replicaInfoByPartition));
-      futureByBroker.put(0, completedFuture(logdirInfoBylogdir));
-
-      logdirInfoBylogdir =  new HashMap<>();
-      replicaInfoByPartition = new HashMap<>();
-      replicaInfoByPartition.put(T0P0, new DescribeLogDirsResponse.ReplicaInfo(0, 0, false));
-      replicaInfoByPartition.put(T0P1, new DescribeLogDirsResponse.ReplicaInfo(0, 0, false));
-      replicaInfoByPartition.put(T1P0, new DescribeLogDirsResponse.ReplicaInfo(0, 0, false));
-      logdirInfoBylogdir.put("/tmp/kafka-logs-1", new DescribeLogDirsResponse.LogDirInfo(Errors.NONE, replicaInfoByPartition));
-      logdirInfoBylogdir.put("/tmp/kafka-logs-2",
-                             new DescribeLogDirsResponse.LogDirInfo(Errors.NONE,
-                                                                    Collections.singletonMap(T1P1, new DescribeLogDirsResponse.ReplicaInfo(0, 0, false))));
-      futureByBroker.put(1, completedFuture(logdirInfoBylogdir));
-      return constructor.newInstance(futureByBroker);
-    } catch (InstantiationException | IllegalAccessException | InvocationTargetException | NoSuchMethodException e) {
-      // Let it go.
+      EasyMock.expect(clusterConfigFuture.get(EasyMock.anyLong(), EasyMock.eq(TimeUnit.MILLISECONDS))).andReturn(config).anyTimes();
+    } catch (InterruptedException | ExecutionException | TimeoutException e) {
+      throw new IllegalStateException("Failed to describe configs.", e);
     }
-    return null;
+
+    return Collections.singletonMap(CLUSTER_CONFIG, clusterConfigFuture);
   }
 
-  private static class TestContext {
+  private Map<Integer, KafkaFuture<Map<String, LogDirDescription>>> getDescribeLogDirsResultValues() {
+
+    Map<Integer, KafkaFuture<Map<String, LogDirDescription>>> futureByBroker = new HashMap<>();
+    Map<String, LogDirDescription> logdirInfoBylogdir = new HashMap<>();
+    Map<TopicPartition, ReplicaInfo> replicaInfoByPartition = new HashMap<>();
+    replicaInfoByPartition.put(T0P0, new ReplicaInfo(0, 0, false));
+    replicaInfoByPartition.put(T0P1, new ReplicaInfo(0, 0, false));
+    replicaInfoByPartition.put(T1P0, new ReplicaInfo(0, 0, false));
+    replicaInfoByPartition.put(T1P1, new ReplicaInfo(0, 0, false));
+    logdirInfoBylogdir.put("/tmp/kafka-logs", new LogDirDescription(null, replicaInfoByPartition));
+    futureByBroker.put(0, completedFuture(logdirInfoBylogdir));
+
+    logdirInfoBylogdir = new HashMap<>();
+    replicaInfoByPartition = new HashMap<>();
+    replicaInfoByPartition.put(T0P0, new ReplicaInfo(0, 0, false));
+    replicaInfoByPartition.put(T0P1, new ReplicaInfo(0, 0, false));
+    replicaInfoByPartition.put(T1P0, new ReplicaInfo(0, 0, false));
+    logdirInfoBylogdir.put("/tmp/kafka-logs-1", new LogDirDescription(null, replicaInfoByPartition));
+    logdirInfoBylogdir.put("/tmp/kafka-logs-2", new LogDirDescription(null,
+            Collections.singletonMap(T1P1, new ReplicaInfo(0, 0, false))));
+    futureByBroker.put(1, completedFuture(logdirInfoBylogdir));
+    return futureByBroker;
+  }
+
+  private static final class TestContext {
     private final LoadMonitor _loadMonitor;
     private final KafkaPartitionMetricSampleAggregator _aggregator;
-    private final KafkaCruiseControlConfig _config;
-    private final Metadata _metadata;
 
-    private TestContext(LoadMonitor loadMonitor,
-                        KafkaPartitionMetricSampleAggregator aggregator,
-                        KafkaCruiseControlConfig config,
-                        Metadata metadata) {
+    private TestContext(LoadMonitor loadMonitor, KafkaPartitionMetricSampleAggregator aggregator) {
       _loadMonitor = loadMonitor;
       _aggregator = aggregator;
-      _config = config;
-      _metadata = metadata;
     }
 
     private LoadMonitor loadmonitor() {
@@ -607,14 +644,6 @@ public class LoadMonitorTest {
 
     private KafkaPartitionMetricSampleAggregator aggregator() {
       return _aggregator;
-    }
-
-    private KafkaCruiseControlConfig config() {
-      return _config;
-    }
-
-    private Metadata metadata() {
-      return _metadata;
     }
   }
 }

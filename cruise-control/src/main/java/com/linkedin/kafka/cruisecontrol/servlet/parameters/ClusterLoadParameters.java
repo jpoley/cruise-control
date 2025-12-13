@@ -17,6 +17,8 @@ import static com.linkedin.kafka.cruisecontrol.servlet.parameters.ParameterUtils
 import static com.linkedin.kafka.cruisecontrol.servlet.parameters.ParameterUtils.START_MS_PARAM;
 import static com.linkedin.kafka.cruisecontrol.servlet.parameters.ParameterUtils.ALLOW_CAPACITY_ESTIMATION_PARAM;
 import static com.linkedin.kafka.cruisecontrol.servlet.parameters.ParameterUtils.POPULATE_DISK_INFO_PARAM;
+import static com.linkedin.kafka.cruisecontrol.servlet.parameters.ParameterUtils.CAPACITY_ONLY_PARAM;
+import static com.linkedin.kafka.cruisecontrol.servlet.parameters.ParameterUtils.REASON_PARAM;
 
 
 /**
@@ -29,7 +31,8 @@ import static com.linkedin.kafka.cruisecontrol.servlet.parameters.ParameterUtils
  * <pre>
  * Get the cluster load
  *    GET /kafkacruisecontrol/load?start=[START_TIMESTAMP]&amp;end=[END_TIMESTAMP]&amp;time=[END_TIMESTAMP]&amp;allow_capacity_estimation=[true/false]
- *    &amp;json=[true/false]&amp;populate_disk_info=[true/false]&amp;get_response_schema=[true/false]
+ *    &amp;json=[true/false]&amp;populate_disk_info=[true/false]&amp;get_response_schema=[true/false]&amp;capacity_only=[true/false]
+ *    &amp;doAs=[user]&amp;reason=[reason-for-request]
  * </pre>
  */
 public class ClusterLoadParameters extends AbstractParameters {
@@ -41,6 +44,8 @@ public class ClusterLoadParameters extends AbstractParameters {
     validParameterNames.add(START_MS_PARAM);
     validParameterNames.add(ALLOW_CAPACITY_ESTIMATION_PARAM);
     validParameterNames.add(POPULATE_DISK_INFO_PARAM);
+    validParameterNames.add(CAPACITY_ONLY_PARAM);
+    validParameterNames.add(REASON_PARAM);
     validParameterNames.addAll(AbstractParameters.CASE_INSENSITIVE_PARAMETER_NAMES);
     CASE_INSENSITIVE_PARAMETER_NAMES = Collections.unmodifiableSortedSet(validParameterNames);
   }
@@ -49,6 +54,7 @@ public class ClusterLoadParameters extends AbstractParameters {
   protected ModelCompletenessRequirements _requirements;
   protected boolean _allowCapacityEstimation;
   protected boolean _populateDiskInfo;
+  protected boolean _capacityOnly;
 
   public ClusterLoadParameters() {
     super();
@@ -57,12 +63,14 @@ public class ClusterLoadParameters extends AbstractParameters {
   @Override
   protected void initParameters() throws UnsupportedEncodingException {
     super.initParameters();
-    Long time = ParameterUtils.time(_request);
-    _endMs = time == null ? ParameterUtils.endMs(_request) : time;
-    _startMs = ParameterUtils.startMs(_request);
+    Long time = ParameterUtils.time(_requestContext);
+    _endMs = time == null ? ParameterUtils.endMsOrDefault(_requestContext, System.currentTimeMillis()) : time;
+    _startMs = ParameterUtils.startMsOrDefault(_requestContext, ParameterUtils.DEFAULT_START_TIME_FOR_CLUSTER_MODEL);
+    ParameterUtils.validateTimeRange(_startMs, _endMs);
     _requirements = new ModelCompletenessRequirements(1, 0.0, true);
-    _allowCapacityEstimation = ParameterUtils.allowCapacityEstimation(_request);
-    _populateDiskInfo = ParameterUtils.populateDiskInfo(_request);
+    _allowCapacityEstimation = ParameterUtils.allowCapacityEstimation(_requestContext);
+    _populateDiskInfo = ParameterUtils.populateDiskInfo(_requestContext);
+    _capacityOnly = ParameterUtils.capacityOnly(_requestContext);
   }
 
   public long startMs() {
@@ -83,6 +91,10 @@ public class ClusterLoadParameters extends AbstractParameters {
 
   public boolean populateDiskInfo() {
     return _populateDiskInfo;
+  }
+
+  public boolean capacityOnly() {
+    return _capacityOnly;
   }
 
   @Override

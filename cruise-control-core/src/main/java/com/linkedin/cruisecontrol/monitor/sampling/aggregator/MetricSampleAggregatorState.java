@@ -36,17 +36,12 @@ class MetricSampleAggregatorState<G, E extends Entity<G>> extends WindowIndexedA
   // The window size.
   private final long _windowMs;
 
-  @Override
-  protected int length() {
-    return _windowGenerations.length;
-  }
-
   /**
    * Construct the MetricSampleAggregatorState.
    */
   MetricSampleAggregatorState(int numWindows, long windowMs, int completenessCacheSize) {
     super();
-    _completenessCache = new LinkedHashMap<AggregationOptions<G, E>, MetricSampleCompleteness<G, E>>() {
+    _completenessCache = new LinkedHashMap<>() {
       @Override
       protected boolean removeEldestEntry(Map.Entry<AggregationOptions<G, E>, MetricSampleCompleteness<G, E>> eldest) {
         return this.size() > completenessCacheSize;
@@ -58,6 +53,11 @@ class MetricSampleAggregatorState<G, E extends Entity<G>> extends WindowIndexedA
       _windowGenerations[arrayIndex] = new MyAtomicLong(0);
     }
     _windowMs = windowMs;
+  }
+
+  @Override
+  protected int length() {
+    return _windowGenerations.length;
   }
 
   /**
@@ -124,7 +124,7 @@ class MetricSampleAggregatorState<G, E extends Entity<G>> extends WindowIndexedA
 
   /**
    * Get the list of window indices that need to be updated based on the current generation.
-   * This method also removes the windows that are older than the oldestWindowIndex from the the internal state
+   * This method also removes the windows that are older than the oldestWindowIndex from the internal state
    * of this class.
    *
    * @param oldestWindowIndex the index of the oldest window in the MetricSampleAggregator.
@@ -153,6 +153,7 @@ class MetricSampleAggregatorState<G, E extends Entity<G>> extends WindowIndexedA
    * @param fromWindowIndex the index of the starting window (inclusive)
    * @param toWindowIndex the index of the end window (inclusive)
    * @param options the {@link AggregationOptions}
+   * @param currentGeneration Current generation.
    * @return The {@link MetricSampleCompleteness} for the given parameters.
    */
   synchronized MetricSampleCompleteness<G, E> completeness(long fromWindowIndex,

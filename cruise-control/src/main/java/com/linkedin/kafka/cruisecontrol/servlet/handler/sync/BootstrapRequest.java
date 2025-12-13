@@ -10,6 +10,7 @@ import com.linkedin.kafka.cruisecontrol.servlet.response.BootstrapResult;
 import java.util.Map;
 
 import static com.linkedin.kafka.cruisecontrol.servlet.parameters.ParameterUtils.BOOTSTRAP_PARAMETER_OBJECT_CONFIG;
+import static com.linkedin.cruisecontrol.common.utils.Utils.validateNotNull;
 
 
 public class BootstrapRequest extends AbstractSyncRequest {
@@ -25,7 +26,10 @@ public class BootstrapRequest extends AbstractSyncRequest {
     Long startMs = _parameters.startMs();
     Long endMs = _parameters.endMs();
     boolean clearMetrics = _parameters.clearMetrics();
-    _kafkaCruiseControl.bootstrap(startMs, endMs, clearMetrics);
+    if (_parameters.developerMode()) {
+      // This endpoint is used only for development purposes in developer_mode=true.
+      _kafkaCruiseControl.bootstrap(startMs, endMs, clearMetrics);
+    }
 
     return new BootstrapResult(_kafkaCruiseControl.config());
   }
@@ -43,10 +47,8 @@ public class BootstrapRequest extends AbstractSyncRequest {
   @Override
   public void configure(Map<String, ?> configs) {
     super.configure(configs);
-    _kafkaCruiseControl = _servlet.asyncKafkaCruiseControl();
-    _parameters = (BootstrapParameters) configs.get(BOOTSTRAP_PARAMETER_OBJECT_CONFIG);
-    if (_parameters == null) {
-      throw new IllegalArgumentException("Parameter configuration is missing from the request.");
-    }
+    _kafkaCruiseControl = getCruiseControlEndpoints().asyncKafkaCruiseControl();
+    _parameters = (BootstrapParameters) validateNotNull(configs.get(BOOTSTRAP_PARAMETER_OBJECT_CONFIG),
+            "Parameter configuration is missing from the request.");
   }
 }

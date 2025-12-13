@@ -13,7 +13,7 @@ import org.apache.kafka.common.PartitionInfo;
 import static com.linkedin.kafka.cruisecontrol.metricsreporter.metric.RawMetricType.*;
 
 
-class HolderUtils {
+final class HolderUtils {
   static final double MISSING_BROKER_METRIC_VALUE = 0.0;
   static final Map<RawMetricType, RawMetricType> METRIC_TYPES_TO_SUM = new HashMap<>();
   static {
@@ -58,7 +58,7 @@ class HolderUtils {
    * @param cluster The Kafka cluster.
    * @param brokerId The id of the broker whose raw metric is missing
    * @param rawMetricType The raw metric type that is missing.
-   * @return True if the missing is allowed, false otherwise.
+   * @return {@code true} if the missing is allowed, {@code false} otherwise.
    */
   static boolean allowMissingBrokerMetric(Cluster cluster, int brokerId, RawMetricType rawMetricType) {
     switch (rawMetricType) {

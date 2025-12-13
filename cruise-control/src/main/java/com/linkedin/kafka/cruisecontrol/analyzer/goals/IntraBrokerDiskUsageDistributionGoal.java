@@ -20,6 +20,7 @@ import com.linkedin.kafka.cruisecontrol.model.SortedReplicasHelper;
 import com.linkedin.kafka.cruisecontrol.monitor.ModelCompletenessRequirements;
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.Comparator;
 import java.util.HashMap;
 import java.util.Iterator;
 import java.util.List;
@@ -31,7 +32,8 @@ import java.util.TreeSet;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import static com.linkedin.kafka.cruisecontrol.analyzer.ActionAcceptance.*;
+import static com.linkedin.kafka.cruisecontrol.analyzer.ActionAcceptance.ACCEPT;
+import static com.linkedin.kafka.cruisecontrol.analyzer.ActionAcceptance.REPLICA_REJECT;
 import static com.linkedin.kafka.cruisecontrol.analyzer.goals.GoalUtils.averageDiskUtilizationPercentage;
 import static com.linkedin.kafka.cruisecontrol.analyzer.goals.GoalUtils.diskUtilizationPercentage;
 import static com.linkedin.kafka.cruisecontrol.analyzer.goals.GoalUtils.replicaSortName;
@@ -93,12 +95,14 @@ public class IntraBrokerDiskUsageDistributionGoal extends AbstractGoal {
     // Sort all the replicas for each disk based on disk utilization.
     Set<String> excludedTopics = optimizationOptions.excludedTopics();
     new SortedReplicasHelper().addSelectionFunc(ReplicaSortFunctionFactory.selectOnlineReplicas())
-                              .addSelectionFunc(ReplicaSortFunctionFactory.selectReplicasBasedOnExcludedTopics(excludedTopics))
+                              .maybeAddSelectionFunc(ReplicaSortFunctionFactory.selectReplicasBasedOnExcludedTopics(excludedTopics),
+                                                     !excludedTopics.isEmpty())
                               .addPriorityFunc(ReplicaSortFunctionFactory.prioritizeDiskImmigrants())
                               .setScoreFunc(ReplicaSortFunctionFactory.reverseSortByMetricGroupValue(RESOURCE.name()))
                               .trackSortedReplicasFor(replicaSortName(this, true, false), clusterModel);
     new SortedReplicasHelper().addSelectionFunc(ReplicaSortFunctionFactory.selectOnlineReplicas())
-                              .addSelectionFunc(ReplicaSortFunctionFactory.selectReplicasBasedOnExcludedTopics(excludedTopics))
+                              .maybeAddSelectionFunc(ReplicaSortFunctionFactory.selectReplicasBasedOnExcludedTopics(excludedTopics),
+                                                     !excludedTopics.isEmpty())
                               .addPriorityFunc(ReplicaSortFunctionFactory.prioritizeDiskImmigrants())
                               .setScoreFunc(ReplicaSortFunctionFactory.sortByMetricGroupValue(RESOURCE.name()))
                               .trackSortedReplicasFor(replicaSortName(this, false, false), clusterModel);
@@ -183,14 +187,6 @@ public class IntraBrokerDiskUsageDistributionGoal extends AbstractGoal {
     return isGettingMoreBalanced(sourceDisk, destinationDisk, sourceUtilizationDelta) ? ACCEPT : REPLICA_REJECT;
   }
 
-  /**
-   * Check if requirements of this goal are not violated if this action is applied to the given cluster state, false otherwise.
-   *
-   * @param  clusterModel The state of the cluster.
-   * @param  action Action containing information about potential modification to the given cluster model.
-   * @return True if requirements of this goal are not violated if this action is applied to the given cluster state,
-   *         false otherwise.
-   */
   @Override
   protected boolean selfSatisfied(ClusterModel clusterModel, BalancingAction action) {
     double sourceUtilizationDelta = sourceUtilizationDelta(action, clusterModel);
@@ -223,19 +219,20 @@ public class IntraBrokerDiskUsageDistributionGoal extends AbstractGoal {
   private boolean isChangeViolatingLimit(double sourceUtilizationDelta, Disk sourceDisk, Disk destinationDisk) {
     double balanceUpperThreshold = _balanceUpperThresholdByBroker.get(sourceDisk.broker());
     double balanceLowerThreshold = _balanceLowerThresholdByBroker.get(sourceDisk.broker());
-    double sourceDiskAllowance = sourceUtilizationDelta > 0 ? sourceDisk.capacity() * balanceUpperThreshold - sourceDisk.utilization() :
-                                                              sourceDisk.utilization() - sourceDisk.capacity() * balanceLowerThreshold;
-    double destinationDiskAllowance = sourceUtilizationDelta > 0 ? destinationDisk.utilization() - destinationDisk.capacity() * balanceLowerThreshold :
-                                                                   destinationDisk.capacity() * balanceUpperThreshold - destinationDisk.utilization();
-    if ((sourceDiskAllowance >= 0 && sourceDiskAllowance < abs(sourceUtilizationDelta)) ||
-        (destinationDiskAllowance >= 0 && destinationDiskAllowance < abs(sourceUtilizationDelta))) {
+    double sourceDiskAllowance = sourceUtilizationDelta > 0 ? sourceDisk.capacity() * balanceUpperThreshold - sourceDisk.utilization()
+                                                            : sourceDisk.utilization() - sourceDisk.capacity() * balanceLowerThreshold;
+    double destinationDiskAllowance =
+        sourceUtilizationDelta > 0 ? destinationDisk.utilization() - destinationDisk.capacity() * balanceLowerThreshold
+                                   : destinationDisk.capacity() * balanceUpperThreshold - destinationDisk.utilization();
+    if ((sourceDiskAllowance >= 0 && sourceDiskAllowance < abs(sourceUtilizationDelta))
+        || (destinationDiskAllowance >= 0 && destinationDiskAllowance < abs(sourceUtilizationDelta))) {
       return true;
     }
     return false;
   }
 
   private boolean isGettingMoreBalanced(Disk sourceDisk, Disk destinationDisk, double sourceUtilizationDelta) {
-    double prevDiff = diskUtilizationPercentage(sourceDisk)  - diskUtilizationPercentage(destinationDisk);
+    double prevDiff = diskUtilizationPercentage(sourceDisk) - diskUtilizationPercentage(destinationDisk);
     double nextDiff = prevDiff + sourceUtilizationDelta / sourceDisk.capacity() + sourceUtilizationDelta / destinationDisk.capacity();
     return abs(nextDiff) < abs(prevDiff);
   }
@@ -284,7 +281,7 @@ public class IntraBrokerDiskUsageDistributionGoal extends AbstractGoal {
    * @param clusterModel         The current cluster model.
    * @param optimizedGoals       Optimized goals.
    * @param optimizationOptions  Options to take into account during optimization -- e.g. excluded topics.
-   * @return True if the disk to balance is still underloaded, false otherwise.
+   * @return {@code true} if the disk to balance is still underloaded, {@code false} otherwise.
    */
   private boolean rebalanceByMovingLoadIn(Disk disk,
                                           ClusterModel clusterModel,
@@ -334,7 +331,7 @@ public class IntraBrokerDiskUsageDistributionGoal extends AbstractGoal {
    * @param clusterModel         The current cluster model.
    * @param optimizedGoals       Optimized goals.
    * @param optimizationOptions  Options to take into account during optimization -- e.g. excluded topics.
-   * @return True if the disk to balance is still overloaded, false otherwise.
+   * @return {@code true} if the disk to balance is still overloaded, {@code false} otherwise.
    */
   private boolean rebalanceByMovingLoadOut(Disk disk,
                                            ClusterModel clusterModel,
@@ -342,8 +339,7 @@ public class IntraBrokerDiskUsageDistributionGoal extends AbstractGoal {
                                            OptimizationOptions optimizationOptions) {
     Broker broker = disk.broker();
     double brokerUtilization = averageDiskUtilizationPercentage(broker);
-    PriorityQueue<Disk> candidateDiskPQ = new PriorityQueue<>(
-        (d1, d2) -> Double.compare(diskUtilizationPercentage(d1), diskUtilizationPercentage(d2)));
+    PriorityQueue<Disk> candidateDiskPQ = new PriorityQueue<>(Comparator.comparingDouble(GoalUtils::diskUtilizationPercentage));
     for (Disk candidateDisk : broker.disks()) {
       // Get candidate disk on broker to try moving load to -- sorted in the order of trial (ascending load).
       if (candidateDisk.isAlive() && diskUtilizationPercentage(candidateDisk) < brokerUtilization) {
@@ -391,8 +387,7 @@ public class IntraBrokerDiskUsageDistributionGoal extends AbstractGoal {
     long swapStartTimeMs = System.currentTimeMillis();
     Broker broker = disk.broker();
 
-    PriorityQueue<Disk> candidateDiskPQ = new PriorityQueue<>(
-        (d1, d2) -> Double.compare(diskUtilizationPercentage(d1), diskUtilizationPercentage(d2)));
+    PriorityQueue<Disk> candidateDiskPQ = new PriorityQueue<>(Comparator.comparingDouble(GoalUtils::diskUtilizationPercentage));
     for (Disk candidateDisk : broker.disks()) {
       // Get candidate disk on broker to try to swap replica with -- sorted in the order of trial (ascending load).
       if (candidateDisk.isAlive() && diskUtilizationPercentage(candidateDisk) < _balanceUpperThresholdByBroker.get(broker)) {
@@ -402,13 +397,12 @@ public class IntraBrokerDiskUsageDistributionGoal extends AbstractGoal {
 
     while (!candidateDiskPQ.isEmpty()) {
       Disk candidateDisk = candidateDiskPQ.poll();
-      for (Iterator<Replica> iterator = disk.trackedSortedReplicas(replicaSortName(this, true, false)).sortedReplicas(false).iterator();
-          iterator.hasNext(); ) {
-        Replica sourceReplica = iterator.next();
+      for (Replica sourceReplica : disk.trackedSortedReplicas(replicaSortName(this, true, false)).sortedReplicas(false)) {
         // Try swapping the source with the candidate replicas. Get the swapped in replica if successful, null otherwise.
         Replica swappedIn = maybeSwapReplicaBetweenDisks(clusterModel,
                                                          sourceReplica,
-                                                         candidateDisk.trackedSortedReplicas(replicaSortName(this, false, false)).sortedReplicas(false),
+                                                         candidateDisk.trackedSortedReplicas(replicaSortName(this, false, false))
+                                                                      .sortedReplicas(false),
                                                          optimizedGoals);
         if (swappedIn != null) {
           if (diskUtilizationPercentage(disk) < _balanceUpperThresholdByBroker.get(broker)) {
@@ -454,13 +448,12 @@ public class IntraBrokerDiskUsageDistributionGoal extends AbstractGoal {
 
     while (!candidateDiskPQ.isEmpty()) {
       Disk candidateDisk = candidateDiskPQ.poll();
-      for (Iterator<Replica> iterator = disk.trackedSortedReplicas(replicaSortName(this, false, false)).sortedReplicas(false).iterator();
-          iterator.hasNext(); ) {
-        Replica sourceReplica = iterator.next();
+      for (Replica sourceReplica : disk.trackedSortedReplicas(replicaSortName(this, false, false)).sortedReplicas(false)) {
         // Try swapping the source with the candidate replicas. Get the swapped in replica if successful, null otherwise.
         Replica swappedIn = maybeSwapReplicaBetweenDisks(clusterModel,
                                                          sourceReplica,
-                                                         candidateDisk.trackedSortedReplicas(replicaSortName(this, true, false)).sortedReplicas(false),
+                                                         candidateDisk.trackedSortedReplicas(replicaSortName(this, true, false))
+                                                                      .sortedReplicas(false),
                                                          optimizedGoals);
         if (swappedIn != null) {
           if (diskUtilizationPercentage(disk) > _balanceLowerThresholdByBroker.get(broker)) {
@@ -490,14 +483,13 @@ public class IntraBrokerDiskUsageDistributionGoal extends AbstractGoal {
     return PER_DISK_SWAP_TIMEOUT_MS - (System.currentTimeMillis() - swapStartTimeMs);
   }
 
-
   @Override
   public ClusterModelStatsComparator clusterModelStatsComparator() {
     return new ClusterModelStatsComparator() {
       @Override
       public int compare(ClusterModelStats stats1, ClusterModelStats stats2) {
-        if (stats1.numUnbalancedDisks() > stats2.numUnbalancedDisks() ||
-            stats1.diskUtilizationStandardDeviation() > stats2.diskUtilizationStandardDeviation()) {
+        if (stats1.numUnbalancedDisks() > stats2.numUnbalancedDisks()
+            || stats1.diskUtilizationStandardDeviation() > stats2.diskUtilizationStandardDeviation()) {
           return -1;
         }
         return 1;
@@ -513,17 +505,5 @@ public class IntraBrokerDiskUsageDistributionGoal extends AbstractGoal {
   @Override
   public ModelCompletenessRequirements clusterModelCompletenessRequirements() {
     return new ModelCompletenessRequirements(_numWindows, _minMonitoredPartitionPercentage, false);
-  }
-
-  /**
-   * @return The name of this goal. Name of a goal provides an identification for the goal in human readable format.
-   */
-  public String name() {
-    return this.getClass().getSimpleName();
-  }
-
-  @Override
-  public void finish() {
-    _finished = true;
   }
 }

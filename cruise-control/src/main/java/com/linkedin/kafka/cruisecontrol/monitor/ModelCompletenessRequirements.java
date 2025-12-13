@@ -47,7 +47,7 @@ public class ModelCompletenessRequirements {
    * Constructor for the requirements.
    * @param minNumValidWindows the minimum number of valid windows to generate the model. Tha value must positive.
    * @param minValidPartitionsRatio The minimum required percentage of monitored partitions.
-   * @param includeAllTopics whether all the topics should be included to the time window. When set to true, all the
+   * @param includeAllTopics whether all the topics should be included to the time window. When set to {@code true}, all the
    *                         topics will be included even when there is not enough snapshots. An empty snapshot will
    *                         be used if there is no sample for a partition.
    */
@@ -55,12 +55,10 @@ public class ModelCompletenessRequirements {
                                        double minValidPartitionsRatio,
                                        boolean includeAllTopics) {
     if (minNumValidWindows <= 0) {
-      throw new IllegalArgumentException("Invalid minNumValidWindows " + minNumValidWindows +
-                                             ". The minNumValidWindows must be positive.");
+      throw new IllegalArgumentException("Invalid minNumValidWindows " + minNumValidWindows + ". The minNumValidWindows must be positive.");
     }
     if (minValidPartitionsRatio < 0 || minValidPartitionsRatio > 1) {
-      throw new IllegalArgumentException("Invalid minValidPartitionsRatio "
-                                             + minValidPartitionsRatio + ". The value must be between 0 and 1"
+      throw new IllegalArgumentException("Invalid minValidPartitionsRatio " + minValidPartitionsRatio + ". The value must be between 0 and 1"
                                              + ", both inclusive.");
     }
     _minRequiredNumWindows = minNumValidWindows;

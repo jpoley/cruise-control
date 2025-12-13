@@ -7,8 +7,10 @@ package com.linkedin.kafka.cruisecontrol.servlet.response;
 import com.linkedin.kafka.cruisecontrol.config.KafkaCruiseControlConfig;
 import com.linkedin.kafka.cruisecontrol.servlet.CruiseControlEndPoint;
 import com.linkedin.cruisecontrol.servlet.parameters.CruiseControlParameters;
+import com.linkedin.kafka.cruisecontrol.servlet.parameters.BootstrapParameters;
+import com.linkedin.kafka.cruisecontrol.servlet.parameters.ParameterUtils;
 
-import static com.linkedin.kafka.cruisecontrol.servlet.response.ResponseUtils.getBaseJSONString;
+import static com.linkedin.kafka.cruisecontrol.servlet.response.ResponseUtils.getBaseJsonString;
 
 
 @JsonResponseClass
@@ -22,7 +24,9 @@ public class BootstrapResult extends AbstractCruiseControlResponse {
   @Override
   protected void discardIrrelevantAndCacheRelevant(CruiseControlParameters parameters) {
     // Cache relevant response.
-    String message = String.format("Bootstrap started. Check status through the %s endpoint", CruiseControlEndPoint.STATE);
-    _cachedResponse = parameters.json() ? getBaseJSONString(message) : message;
+    String message = ((BootstrapParameters) parameters).developerMode()
+                     ? String.format("Bootstrap started. Check status through the %s endpoint", CruiseControlEndPoint.STATE)
+                     : String.format("This endpoint is used only for development purposes in %s=true.", ParameterUtils.DEVELOPER_MODE_PARAM);
+    _cachedResponse = parameters.json() ? getBaseJsonString(message) : message;
   }
 }

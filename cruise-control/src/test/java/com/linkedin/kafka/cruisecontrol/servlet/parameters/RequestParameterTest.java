@@ -12,13 +12,11 @@ import io.swagger.v3.oas.models.Paths;
 import io.swagger.v3.oas.models.OpenAPI;
 import io.swagger.v3.oas.models.parameters.Parameter;
 import io.swagger.v3.parser.OpenAPIV3Parser;
-
 import io.swagger.v3.parser.core.models.ParseOptions;
 import io.swagger.v3.parser.core.models.SwaggerParseResult;
 import org.junit.Assert;
 import org.junit.Before;
 import org.junit.Test;
-
 import java.util.List;
 import java.util.Set;
 import java.util.Map;
@@ -26,12 +24,11 @@ import java.util.HashMap;
 import java.util.TreeSet;
 
 import static com.linkedin.kafka.cruisecontrol.KafkaCruiseControlUnitTestUtils.OPENAPI_SPEC_PATH;
-import static com.linkedin.kafka.cruisecontrol.servlet.KafkaCruiseControlServletUtils.REQUEST_URI;
 import static com.linkedin.kafka.cruisecontrol.servlet.KafkaCruiseControlServletUtils.requestParameterFor;
 
 public class RequestParameterTest {
   private Map<String, CruiseControlParameters> _endpointToClass;
-  OpenAPI _openAPI;
+  private OpenAPI _openAPI;
   /**
    * Specify endpoints to be tested
    */
@@ -40,9 +37,9 @@ public class RequestParameterTest {
     _endpointToClass = new HashMap<>();
     KafkaCruiseControlConfig defaultConfig = new KafkaCruiseControlConfig(KafkaCruiseControlUnitTestUtils.getKafkaCruiseControlProperties());
     for (CruiseControlEndPoint endpoint : CruiseControlEndPoint.cachedValues()) {
-      _endpointToClass.put((REQUEST_URI + endpoint.toString()).toLowerCase(),
+      _endpointToClass.put("/" + endpoint.toString().toLowerCase(),
                            ((CruiseControlParameters) (defaultConfig.getClass(requestParameterFor(endpoint).parametersClass()).newInstance())));
-}
+    }
   }
 
   /**

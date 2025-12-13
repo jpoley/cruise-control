@@ -22,11 +22,11 @@ public class ClusterModelStatsValue {
   protected final Map<Statistic, Number> _leaderReplicaStats;
   protected final Map<Statistic, Number> _topicReplicaStats;
 
-  public  ClusterModelStatsValue(Map<Statistic, Map<Resource, Double>> resourceUtilizationStats,
-                                 Map<Statistic, Double> potentialNwOutUtilizationStats,
-                                 Map<Statistic, Number> replicaStats,
-                                 Map<Statistic, Number> leaderReplicaStats,
-                                 Map<Statistic, Number> topicReplicaStats) {
+  public ClusterModelStatsValue(Map<Statistic, Map<Resource, Double>> resourceUtilizationStats,
+                                Map<Statistic, Double> potentialNwOutUtilizationStats,
+                                Map<Statistic, Number> replicaStats,
+                                Map<Statistic, Number> leaderReplicaStats,
+                                Map<Statistic, Number> topicReplicaStats) {
     _resourceUtilizationStats = resourceUtilizationStats;
     _potentialNwOutUtilizationStats = potentialNwOutUtilizationStats;
     _replicaStats = replicaStats;
@@ -37,7 +37,7 @@ public class ClusterModelStatsValue {
   protected Map<String, Object> getJsonStructure() {
     List<Statistic> cachedStatistic = Statistic.cachedValues();
     // List of all statistics AVG, MAX, MIN, STD
-    Map<String, Object> allStatMap = new HashMap<>(cachedStatistic.size());
+    Map<String, Object> allStatMap = new HashMap<>();
     for (Statistic stat : cachedStatistic) {
       allStatMap.put(stat.stat(), new ClusterModelStatsValueHolder(_resourceUtilizationStats.get(stat),
                                                                    _potentialNwOutUtilizationStats.get(stat),
@@ -60,7 +60,7 @@ public class ClusterModelStatsValue {
                                                  _potentialNwOutUtilizationStats.get(stat),
                                                  _replicaStats.get(stat),
                                                  _leaderReplicaStats.get(stat),
-                                                 _topicReplicaStats.get(stat)).toString());
+                                                 _topicReplicaStats.get(stat)));
     }
     return sb.substring(0, sb.length() - 2);
   }

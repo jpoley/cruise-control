@@ -5,18 +5,23 @@
 
 package com.linkedin.kafka.cruisecontrol.analyzer.kafkaassigner;
 
-import com.linkedin.kafka.cruisecontrol.analyzer.OptimizationOptions;
+import com.google.common.annotations.VisibleForTesting;
 import com.linkedin.kafka.cruisecontrol.analyzer.ActionAcceptance;
-import com.linkedin.kafka.cruisecontrol.analyzer.BalancingAction;
-import com.linkedin.kafka.cruisecontrol.analyzer.goals.Goal;
 import com.linkedin.kafka.cruisecontrol.analyzer.ActionType;
+import com.linkedin.kafka.cruisecontrol.analyzer.BalancingAction;
+import com.linkedin.kafka.cruisecontrol.analyzer.OptimizationOptions;
+import com.linkedin.kafka.cruisecontrol.analyzer.ProvisionResponse;
+import com.linkedin.kafka.cruisecontrol.analyzer.ProvisionStatus;
+import com.linkedin.kafka.cruisecontrol.analyzer.goals.Goal;
 import com.linkedin.kafka.cruisecontrol.analyzer.goals.GoalUtils;
+import com.linkedin.kafka.cruisecontrol.analyzer.goals.rackaware.NoOpRackAwareGoalRackIdMapper;
+import com.linkedin.kafka.cruisecontrol.analyzer.goals.rackaware.RackAwareGoalRackIdMapper;
 import com.linkedin.kafka.cruisecontrol.exception.KafkaCruiseControlException;
 import com.linkedin.kafka.cruisecontrol.exception.OptimizationFailureException;
 import com.linkedin.kafka.cruisecontrol.model.Broker;
 import com.linkedin.kafka.cruisecontrol.model.ClusterModel;
-import com.linkedin.kafka.cruisecontrol.model.ClusterModelStats;
 import com.linkedin.kafka.cruisecontrol.model.Partition;
+import com.linkedin.kafka.cruisecontrol.model.Rack;
 import com.linkedin.kafka.cruisecontrol.model.Replica;
 import com.linkedin.kafka.cruisecontrol.monitor.ModelCompletenessRequirements;
 import java.util.HashMap;
@@ -33,19 +38,34 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import static com.linkedin.kafka.cruisecontrol.analyzer.ActionAcceptance.ACCEPT;
-import static com.linkedin.kafka.cruisecontrol.analyzer.ActionAcceptance.REPLICA_REJECT;
 import static com.linkedin.kafka.cruisecontrol.analyzer.ActionAcceptance.BROKER_REJECT;
+import static com.linkedin.kafka.cruisecontrol.analyzer.ActionAcceptance.REPLICA_REJECT;
 import static com.linkedin.kafka.cruisecontrol.analyzer.goals.GoalUtils.MIN_NUM_VALID_WINDOWS_FOR_SELF_HEALING;
 
 
 public class KafkaAssignerEvenRackAwareGoal implements Goal {
   private static final Logger LOG = LoggerFactory.getLogger(KafkaAssignerEvenRackAwareGoal.class);
+  private static final RackAwareGoalRackIdMapper DEFAULT_RACK_ID_MAPPER = new NoOpRackAwareGoalRackIdMapper();
+
+  private final ProvisionResponse _provisionResponse;
   private final Map<Integer, SortedSet<BrokerReplicaCount>> _aliveBrokerReplicaCountByPosition;
   private Map<String, List<Partition>> _partitionsByTopic;
+
+  @VisibleForTesting
+  RackAwareGoalRackIdMapper _rackIdMapper = DEFAULT_RACK_ID_MAPPER;
 
   public KafkaAssignerEvenRackAwareGoal() {
     _partitionsByTopic = null;
     _aliveBrokerReplicaCountByPosition = new HashMap<>();
+    _provisionResponse = new ProvisionResponse(ProvisionStatus.UNDECIDED);
+  }
+
+  protected String mappedRackIdOf(Broker broker) {
+    return mappedRackIdOf(broker.rack());
+  }
+
+  protected String mappedRackIdOf(Rack rack) {
+    return _rackIdMapper.apply(rack.id());
   }
 
   /**
@@ -154,27 +174,27 @@ public class KafkaAssignerEvenRackAwareGoal implements Goal {
    * If the destination broker has:
    * (1) no other replica from the same partition, move the replica to there.
    * (2) a replica with a larger position AND the source broker is alive, swap positions.
-   * (3) the conditions (1-2) are false AND the source broker is dead.
+   * (3) the conditions (1-2) are {@code false} AND the source broker is dead.
    * (4) the current replica under consideration, do nothing -- i.e. do not move replica or swap positions.
    *
    * @param clusterModel The state of the cluster.
    * @param partition The partition whose replica might be moved.
    * @param replicaPosition The position of the replica in the given partition.
-   * @return True if a move is applied, false otherwise.
+   * @return {@code true} if a move is applied, {@code false} otherwise.
    */
   private boolean maybeApplyMove(ClusterModel clusterModel, Partition partition, int replicaPosition) {
     // Racks with replica whose position is in [0, replicaPosition - 1] are ineligible for assignment.
     Set<String> ineligibleRackIds = new HashSet<>();
     for (int pos = 0; pos < replicaPosition; pos++) {
       Replica replica = replicaAtPosition(partition, pos);
-      ineligibleRackIds.add(replica.broker().rack().id());
+      ineligibleRackIds.add(mappedRackIdOf(replica.broker()));
     }
     // Find an eligible destination and apply the relevant move.
     BrokerReplicaCount eligibleBrokerReplicaCount = null;
     for (final Iterator<BrokerReplicaCount> it = _aliveBrokerReplicaCountByPosition.get(replicaPosition).iterator();
          it.hasNext(); ) {
       BrokerReplicaCount destinationBrokerReplicaCount = it.next();
-      if (ineligibleRackIds.contains(destinationBrokerReplicaCount.broker().rack().id())) {
+      if (ineligibleRackIds.contains(mappedRackIdOf(destinationBrokerReplicaCount.broker()))) {
         continue;
       }
 
@@ -269,6 +289,7 @@ public class KafkaAssignerEvenRackAwareGoal implements Goal {
    *
    * @param sourcePartition Partition whose replica will be returned.
    * @param position The position of replica in the partition, i.e. 0 means leader, 1 is the first follower, and so on.
+   * @return The replica of the given partition residing in the given position.
    */
   private Replica replicaAtPosition(Partition sourcePartition, int position) {
     return sourcePartition.replicas().get(position);
@@ -281,7 +302,7 @@ public class KafkaAssignerEvenRackAwareGoal implements Goal {
    * @param partition The partition of replica to be checked.
    * @param position The position of replica in the given partition.
    * @param excludedTopics The excluded topics set.
-   * @return True if the replica should be excluded, false otherwise.
+   * @return {@code true} if the replica should be excluded, {@code false} otherwise.
    */
   private boolean shouldExclude(Partition partition, int position, Set<String> excludedTopics) {
     Replica replica = replicaAtPosition(partition, position);
@@ -297,7 +318,8 @@ public class KafkaAssignerEvenRackAwareGoal implements Goal {
   private void ensureRackAwareSatisfiable(ClusterModel clusterModel, Set<String> excludedTopics)
       throws OptimizationFailureException {
     // Sanity Check: not enough racks to satisfy rack awareness.
-    int numAliveRacks = clusterModel.numAliveRacks();
+    // Assumes number of racks doesn't exceed Integer.MAX_VALUE
+    int numAliveRacks = (int) clusterModel.aliveRacks().stream().map(this::mappedRackIdOf).distinct().count();
     if (!excludedTopics.isEmpty()) {
       int maxReplicationFactorOfIncludedTopics = 1;
       Map<String, Integer> replicationFactorByTopic = clusterModel.replicationFactorByTopic();
@@ -339,10 +361,10 @@ public class KafkaAssignerEvenRackAwareGoal implements Goal {
 
       // Add rack Id of replicas.
       for (Broker followerBroker : followerBrokers) {
-        String followerRackId = followerBroker.rack().id();
+        String followerRackId = mappedRackIdOf(followerBroker);
         replicaBrokersRackIds.add(followerRackId);
       }
-      replicaBrokersRackIds.add(leader.broker().rack().id());
+      replicaBrokersRackIds.add(mappedRackIdOf(leader.broker()));
       if (replicaBrokersRackIds.size() != (followerBrokers.size() + 1)) {
         throw new OptimizationFailureException("Optimization for goal " + name() + " failed for rack-awareness of "
                                                + "partition " + leader.topicPartition());
@@ -394,14 +416,10 @@ public class KafkaAssignerEvenRackAwareGoal implements Goal {
     Set<Broker> partitionBrokers = clusterModel.partition(sourceReplica.topicPartition()).partitionBrokers();
     partitionBrokers.remove(sourceReplica.broker());
 
-    // Remove brokers in partition broker racks except the brokers in replica broker rack.
-    for (Broker broker : partitionBrokers) {
-      if (broker.rack().brokers().contains(destinationBroker)) {
-        return true;
-      }
-    }
-
-    return false;
+    // If destination broker exists on any of the rack of other replicas, it violates the rack-awareness
+    return partitionBrokers.stream()
+                           .map(this::mappedRackIdOf)
+                           .anyMatch(mappedRackIdOf(destinationBroker)::equals);
   }
 
   @Override
@@ -429,27 +447,24 @@ public class KafkaAssignerEvenRackAwareGoal implements Goal {
   }
 
   @Override
+  public ProvisionStatus provisionStatus() {
+    // Provision status computation is not supported for kafka_assigner goals.
+    return provisionResponse().status();
+  }
+
+  @Override
+  public ProvisionResponse provisionResponse() {
+    return _provisionResponse;
+  }
+
+  @Override
   public ClusterModelStatsComparator clusterModelStatsComparator() {
-    return new EvenRackAwareGoalStatsComparator();
+    return new GoalUtils.HardGoalStatsComparator();
   }
 
   @Override
   public void configure(Map<String, ?> configs) {
-    // No external config is used.
-  }
-
-  private static class EvenRackAwareGoalStatsComparator implements ClusterModelStatsComparator {
-
-    @Override
-    public int compare(ClusterModelStats stats1, ClusterModelStats stats2) {
-      // This goal does not care about stats. The optimization would have already failed if the goal is not met.
-      return 0;
-    }
-
-    @Override
-    public String explainLastComparison() {
-      return null;
-    }
+    _rackIdMapper = GoalUtils.getRackAwareGoalRackIdMapper(configs);
   }
 
   /**

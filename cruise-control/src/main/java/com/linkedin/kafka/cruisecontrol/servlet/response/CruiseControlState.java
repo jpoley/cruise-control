@@ -9,12 +9,12 @@ import com.linkedin.kafka.cruisecontrol.analyzer.goals.Goal;
 import com.linkedin.kafka.cruisecontrol.config.KafkaCruiseControlConfig;
 import com.linkedin.kafka.cruisecontrol.detector.AnomalyDetectorState;
 import com.linkedin.kafka.cruisecontrol.executor.ExecutionTask;
+import com.linkedin.kafka.cruisecontrol.executor.ExecutionTaskState;
 import com.linkedin.kafka.cruisecontrol.executor.ExecutorState;
+import com.linkedin.kafka.cruisecontrol.model.LinearRegressionModelParameters;
 import com.linkedin.kafka.cruisecontrol.monitor.LoadMonitorState;
-import com.linkedin.kafka.cruisecontrol.monitor.sampling.aggregator.SampleExtrapolation;
 import com.linkedin.cruisecontrol.servlet.parameters.CruiseControlParameters;
 import com.linkedin.kafka.cruisecontrol.servlet.parameters.CruiseControlStateParameters;
-import java.util.Arrays;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
@@ -22,14 +22,12 @@ import java.util.Map;
 import com.google.gson.Gson;
 import java.util.Set;
 import java.util.StringJoiner;
-import org.apache.kafka.common.TopicPartition;
+import org.apache.commons.math3.linear.SingularMatrixException;
 
+import static com.linkedin.kafka.cruisecontrol.executor.ExecutorState.IN_PROGRESS_STATES;
 import static com.linkedin.kafka.cruisecontrol.servlet.response.ResponseUtils.JSON_VERSION;
 import static com.linkedin.kafka.cruisecontrol.servlet.response.ResponseUtils.VERSION;
 import static com.linkedin.kafka.cruisecontrol.executor.ExecutionTask.TaskType;
-import static com.linkedin.kafka.cruisecontrol.executor.ExecutionTask.State;
-import static com.linkedin.kafka.cruisecontrol.executor.ExecutorState.State.NO_TASK_IN_PROGRESS;
-import static com.linkedin.kafka.cruisecontrol.executor.ExecutorState.State.STARTING_EXECUTION;
 
 @JsonResponseClass
 public class CruiseControlState extends AbstractCruiseControlResponse {
@@ -61,23 +59,7 @@ public class CruiseControlState extends AbstractCruiseControlResponse {
     _anomalyDetectorState = anomalyDetectorState;
   }
 
-  public ExecutorState executorState() {
-    return _executorState;
-  }
-
-  public LoadMonitorState monitorState() {
-    return _monitorState;
-  }
-
-  public AnalyzerState analyzerState() {
-    return _analyzerState;
-  }
-
-  public AnomalyDetectorState anomalyDetectorState() {
-    return _anomalyDetectorState;
-  }
-
-  protected String getJSONString(CruiseControlParameters parameters) {
+  protected String getJsonString(CruiseControlParameters parameters) {
     Gson gson = new Gson();
     Map<String, Object> jsonStructure = getJsonStructure(((CruiseControlStateParameters) parameters).isVerbose());
     jsonStructure.put(VERSION, JSON_VERSION);
@@ -85,7 +67,7 @@ public class CruiseControlState extends AbstractCruiseControlResponse {
   }
 
   /**
-   * @param verbose True if verbose, false otherwise.
+   * @param verbose {@code true} if verbose, {@code false} otherwise.
    * @return An object that can be further used to encode into JSON.
    */
   public Map<String, Object> getJsonStructure(boolean verbose) {
@@ -114,7 +96,7 @@ public class CruiseControlState extends AbstractCruiseControlResponse {
       for (Map.Entry<Long, Float> entry : _monitorState.monitoredWindows().entrySet()) {
         joiner.add(String.format("%d=%.3f%%", entry.getKey(), entry.getValue() * 100));
       }
-      sb.append(joiner.toString());
+      sb.append(joiner);
     }
   }
 
@@ -131,55 +113,57 @@ public class CruiseControlState extends AbstractCruiseControlResponse {
 
   protected void writeVerboseExecutorState(StringBuilder sb) {
     if (_executorState != null) {
-      // There is no execution task summary if executor is in idle state.
-      if (_executorState.state() == NO_TASK_IN_PROGRESS || _executorState.state() == STARTING_EXECUTION) {
+      // There is no execution task summary if no execution is in progress.
+      if (!IN_PROGRESS_STATES.contains(_executorState.state())) {
         return;
       }
-      Map<TaskType, Map<State, Set<ExecutionTask>>> taskSnapshot = _executorState.executionTasksSummary().filteredTasksByState();
+      Map<TaskType, Map<ExecutionTaskState, Set<ExecutionTask>>> taskSnapshot = _executorState.executionTasksSummary().filteredTasksByState();
       taskSnapshot.forEach((type, taskMap) -> {
-        String taskTypeString = type == TaskType.INTER_BROKER_REPLICA_ACTION ? INTER_BROKER_PARTITION_MOVEMENTS :
-                                type == TaskType.INTRA_BROKER_REPLICA_ACTION ? INTRA_BROKER_PARTITION_MOVEMENTS :
-                                                                               LEADERSHIP_MOVEMENTS;
+        String taskTypeString = type == TaskType.INTER_BROKER_REPLICA_ACTION
+                                ? INTER_BROKER_PARTITION_MOVEMENTS : type == TaskType.INTRA_BROKER_REPLICA_ACTION
+                                                                     ? INTRA_BROKER_PARTITION_MOVEMENTS : LEADERSHIP_MOVEMENTS;
         sb.append(String.format("%n%n%s %s:%n",
                                 _executorState.state() == ExecutorState.State.STOPPING_EXECUTION ? "Cancelled" : "Pending",
                                 taskTypeString));
-        for (ExecutionTask task :  taskMap.get(State.PENDING)) {
+        for (ExecutionTask task : taskMap.get(ExecutionTaskState.PENDING)) {
           sb.append(String.format("%s%n", task));
         }
         sb.append(String.format("%n%nIn progress %s:%n", taskTypeString));
-        for (ExecutionTask task : taskMap.get(State.IN_PROGRESS)) {
+        for (ExecutionTask task : taskMap.get(ExecutionTaskState.IN_PROGRESS)) {
           sb.append(String.format("%s%n", task));
         }
         sb.append(String.format("%n%nAborting %s:%n", taskTypeString));
-        for (ExecutionTask task :  taskMap.get(State.ABORTING)) {
+        for (ExecutionTask task : taskMap.get(ExecutionTaskState.ABORTING)) {
           sb.append(String.format("%s%n", task));
         }
         sb.append(String.format("%n%nAborted %s:%n", taskTypeString));
-        for (ExecutionTask task :  taskMap.get(State.ABORTED)) {
+        for (ExecutionTask task : taskMap.get(ExecutionTaskState.ABORTED)) {
           sb.append(String.format("%s%n", task));
         }
         sb.append(String.format("%n%nDead %s:%n", taskTypeString));
-        for (ExecutionTask task :  taskMap.get(State.DEAD)) {
+        for (ExecutionTask task : taskMap.get(ExecutionTaskState.DEAD)) {
           sb.append(String.format("%s%n", task));
         }
       });
     }
   }
 
+  /**
+   * Super verbose response is used only for debugging and development purposes.
+   * It is not exposed in JSON response, and would be dropped in a future release.
+   *
+   * @param sb String builder to append super verbose response.
+   */
   protected void writeSuperVerbose(StringBuilder sb) {
     if (_monitorState != null) {
-      sb.append(String.format("%n%nExtrapolated metric samples:%n"));
-      Map<TopicPartition, List<SampleExtrapolation>> sampleFlaws = _monitorState.sampleExtrapolations();
-      if (sampleFlaws != null && !sampleFlaws.isEmpty()) {
-        for (Map.Entry<TopicPartition, List<SampleExtrapolation>> entry : sampleFlaws.entrySet()) {
-          sb.append(String.format("%n%s: %s", entry.getKey(), entry.getValue()));
-        }
-      } else {
-        sb.append("None");
+      LinearRegressionModelParameters.LinearRegressionModelState linearRegressionModelState;
+      try {
+        linearRegressionModelState = _monitorState.detailTrainingProgress();
+      } catch (SingularMatrixException e) {
+        sb.append(String.format("%n%nFailed to calculate Linear Regression Model State with error message:%n%s", e.getMessage()));
+        return;
       }
-      if (_monitorState.detailTrainingProgress() != null) {
-        sb.append(String.format("%n%nLinear Regression Model State:%n%s", _monitorState.detailTrainingProgress()));
-      }
+      sb.append(String.format("%n%nLinear Regression Model State:%n%s", linearRegressionModelState));
     }
   }
 
@@ -208,7 +192,7 @@ public class CruiseControlState extends AbstractCruiseControlResponse {
   @Override
   protected void discardIrrelevantAndCacheRelevant(CruiseControlParameters parameters) {
     // Cache relevant response.
-    _cachedResponse = parameters.json() ? getJSONString(parameters) : getPlaintext(parameters);
+    _cachedResponse = parameters.json() ? getJsonString(parameters) : getPlaintext(parameters);
     // Discard irrelevant response.
     _executorState = null;
     _monitorState = null;
@@ -219,14 +203,14 @@ public class CruiseControlState extends AbstractCruiseControlResponse {
   public enum SubState {
     ANALYZER, MONITOR, EXECUTOR, ANOMALY_DETECTOR;
 
-    protected static final List<SubState> CACHED_VALUES = Collections.unmodifiableList(Arrays.asList(values()));
+    protected static final List<SubState> CACHED_VALUES = List.of(values());
 
     /**
      * Use this instead of values() because values() creates a new array each time.
      * @return enumerated values in the same order as values()
      */
     public static List<SubState> cachedValues() {
-      return CACHED_VALUES;
+      return Collections.unmodifiableList(CACHED_VALUES);
     }
   }
 }

@@ -10,6 +10,8 @@ import org.apache.kafka.common.TopicPartition;
 import java.util.HashMap;
 import java.util.Map;
 
+import static com.linkedin.cruisecontrol.common.utils.Utils.validateNotNull;
+
 
 /**
  * Represents the load balancing operation over a replica for Kafka Load GoalOptimizer.
@@ -126,42 +128,18 @@ public class BalancingAction {
 
   private void validate() {
     switch (_actionType) {
-      case REPLICA_ADDITION:
-        if (_destinationBrokerId == null) {
-          throw new IllegalArgumentException("The destination broker cannot be null for balancing action " + this);
-        } else if (_sourceBrokerId != null) {
-          throw new IllegalArgumentException("The source broker should be null for balancing action " + this);
-        }
-        break;
-      case REPLICA_DELETION:
-        if (_destinationBrokerId != null) {
-          throw new IllegalArgumentException("The destination broker should be null for balancing action " + this);
-        } else if (_sourceBrokerId == null) {
-      throw new IllegalArgumentException("The source broker cannot be null for balancing action " + this);
-        }
-        break;
       case INTER_BROKER_REPLICA_MOVEMENT:
       case LEADERSHIP_MOVEMENT:
       case INTER_BROKER_REPLICA_SWAP:
-        if (_destinationBrokerId == null) {
-          throw new IllegalArgumentException("The destination broker cannot be null for balancing action " + this);
-        } else if (_sourceBrokerId == null) {
-          throw new IllegalArgumentException("The source broker cannot be null for balancing action " + this);
-        }
+        validateNotNull(_destinationBrokerId, () -> "The destination broker cannot be null for balancing action " + this);
+        validateNotNull(_sourceBrokerId, () -> "The source broker cannot be null for balancing action " + this);
         break;
       case INTRA_BROKER_REPLICA_MOVEMENT:
       case INTRA_BROKER_REPLICA_SWAP:
-        if (_destinationBrokerId == null) {
-          throw new IllegalArgumentException("The destination broker cannot be null for balancing action " + this);
-        } else if (_sourceBrokerId == null) {
-          throw new IllegalArgumentException("The source broker cannot be null for balancing action " + this);
-        }
-        if (_sourceBrokerLogdir == null) {
-          throw new IllegalArgumentException("The source disk cannot be null for balancing action " + this);
-        }
-        if (_destinationBrokerLogdir == null) {
-          throw new IllegalArgumentException("The destination disk cannot be null for balancing action " + this);
-        }
+        validateNotNull(_destinationBrokerId, () -> "The destination broker cannot be null for balancing action " + this);
+        validateNotNull(_sourceBrokerId, () -> "The source broker cannot be null for balancing action " + this);
+        validateNotNull(_sourceBrokerLogdir, () -> "The source disk cannot be null for balancing action " + this);
+        validateNotNull(_destinationBrokerLogdir, () -> "The destination disk cannot be null for balancing action " + this);
         if (!_sourceBrokerId.equals(_destinationBrokerId)) {
           throw new IllegalArgumentException("Replica movement between disks across broker is not supported "
                                              + "for balancing action " + this);
@@ -265,8 +243,8 @@ public class BalancingAction {
    */
   @Override
   public String toString() {
-    String actSymbol = (_actionType.equals(ActionType.INTER_BROKER_REPLICA_SWAP) ||
-                        _actionType.equals(ActionType.INTRA_BROKER_REPLICA_SWAP)) ? "<->" : "->";
+    String actSymbol = (_actionType.equals(ActionType.INTER_BROKER_REPLICA_SWAP)
+                        || _actionType.equals(ActionType.INTRA_BROKER_REPLICA_SWAP)) ? "<->" : "->";
     return String.format("(%s%s%s, %d%s%s%d%s, %s)",
                          _tp, actSymbol, _destinationTp, _sourceBrokerId,
                          _sourceBrokerLogdir == null ? "" : String.format("(%s)", _sourceBrokerLogdir),
@@ -279,7 +257,7 @@ public class BalancingAction {
    * Compare the given object with this object.
    *
    * @param other Other object to be compared with this object.
-   * @return True if other object equals this object, false otherwise.
+   * @return {@code true} if other object equals this object, {@code false} otherwise.
    */
   @Override
   public boolean equals(Object other) {

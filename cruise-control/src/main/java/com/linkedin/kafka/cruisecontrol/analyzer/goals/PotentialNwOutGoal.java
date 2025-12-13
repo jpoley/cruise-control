@@ -16,7 +16,6 @@ import com.linkedin.kafka.cruisecontrol.model.Broker;
 import com.linkedin.kafka.cruisecontrol.model.ClusterModel;
 import com.linkedin.kafka.cruisecontrol.model.ClusterModelStats;
 import com.linkedin.kafka.cruisecontrol.model.Replica;
-
 import com.linkedin.kafka.cruisecontrol.model.ReplicaSortFunctionFactory;
 import com.linkedin.kafka.cruisecontrol.model.SortedReplicasHelper;
 import com.linkedin.kafka.cruisecontrol.monitor.ModelCompletenessRequirements;
@@ -24,7 +23,6 @@ import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
-
 import java.util.SortedSet;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -32,6 +30,8 @@ import org.slf4j.LoggerFactory;
 import static com.linkedin.kafka.cruisecontrol.analyzer.ActionAcceptance.ACCEPT;
 import static com.linkedin.kafka.cruisecontrol.analyzer.ActionAcceptance.REPLICA_REJECT;
 import static com.linkedin.kafka.cruisecontrol.analyzer.goals.GoalUtils.replicaSortName;
+import static com.linkedin.kafka.cruisecontrol.analyzer.goals.GoalUtils.DENOMINATOR_FOR_MIN_VALID_WINDOWS_FOR_SELF_HEALING;
+import static com.linkedin.kafka.cruisecontrol.analyzer.goals.GoalUtils.MIN_NUM_VALID_WINDOWS_FOR_SELF_HEALING;
 
 
 /**
@@ -135,15 +135,9 @@ public class PotentialNwOutGoal extends AbstractGoal {
 
   @Override
   public ModelCompletenessRequirements clusterModelCompletenessRequirements() {
-    return new ModelCompletenessRequirements(Math.max(1, _numWindows / 2), _minMonitoredPartitionPercentage, false);
-  }
-
-  /**
-   * Get the name of this goal. Name of a goal provides an identification for the goal in human readable format.
-   */
-  @Override
-  public String name() {
-    return PotentialNwOutGoal.class.getSimpleName();
+    return new ModelCompletenessRequirements(Math.max(MIN_NUM_VALID_WINDOWS_FOR_SELF_HEALING,
+                                                      _numWindows / DENOMINATOR_FOR_MIN_VALID_WINDOWS_FOR_SELF_HEALING),
+                                             _minMonitoredPartitionPercentage, false);
   }
 
   @Override
@@ -161,8 +155,12 @@ public class PotentialNwOutGoal extends AbstractGoal {
   @Override
   protected SortedSet<Broker> brokersToBalance(ClusterModel clusterModel) {
     // Balance the broken brokers (i.e. dead or has bad disks) if any, otherwise balance all brokers.
-    SortedSet<Broker> brokenBrokers = clusterModel.deadBrokers();
-    brokenBrokers.addAll(clusterModel.brokersHavingOfflineReplicasOnBadDisks());
+    SortedSet<Broker> brokenBrokers = clusterModel.brokersHavingOfflineReplicasOnBadDisks();
+    if (!brokenBrokers.isEmpty()) {
+      brokenBrokers.addAll(clusterModel.deadBrokers());
+    } else {
+      brokenBrokers = clusterModel.deadBrokers();
+    }
 
     return brokenBrokers.isEmpty() ? clusterModel.brokers() : brokenBrokers;
   }
@@ -176,8 +174,8 @@ public class PotentialNwOutGoal extends AbstractGoal {
    *
    * @param clusterModel The state of the cluster.
    * @param action Action containing information about potential modification to the given cluster model.
-   * @return True if requirements of this goal are not violated if this action is applied to the given cluster state,
-   * false otherwise.
+   * @return {@code true} if requirements of this goal are not violated if this action is applied to the given cluster state,
+   * {@code false} otherwise.
    */
   @Override
   protected boolean selfSatisfied(ClusterModel clusterModel, BalancingAction action) {
@@ -227,9 +225,11 @@ public class PotentialNwOutGoal extends AbstractGoal {
     _fixOfflineReplicasOnly = false;
 
     // Filter out some replicas based on optimization options.
+    Set<String> excludedTopics = optimizationOptions.excludedTopics();
     new SortedReplicasHelper().maybeAddSelectionFunc(ReplicaSortFunctionFactory.selectImmigrants(),
                                                      optimizationOptions.onlyMoveImmigrantReplicas())
-                              .addSelectionFunc(ReplicaSortFunctionFactory.selectReplicasBasedOnExcludedTopics(optimizationOptions.excludedTopics()))
+                              .maybeAddSelectionFunc(ReplicaSortFunctionFactory.selectReplicasBasedOnExcludedTopics(excludedTopics),
+                                                     !excludedTopics.isEmpty())
                               .trackSortedReplicasFor(replicaSortName(this, false, false), clusterModel);
   }
 
@@ -258,11 +258,6 @@ public class PotentialNwOutGoal extends AbstractGoal {
     finish();
   }
 
-  @Override
-  public void finish() {
-    _finished = true;
-  }
-
   /**
    * Rebalance the given broker without violating the constraints of the current goal and optimized goals.
    *
@@ -278,15 +273,15 @@ public class PotentialNwOutGoal extends AbstractGoal {
                                     OptimizationOptions optimizationOptions) {
     double capacityThreshold = _balancingConstraint.capacityThreshold(Resource.NW_OUT);
     double capacityLimit = broker.capacityFor(Resource.NW_OUT) * capacityThreshold;
-    boolean estimatedMaxPossibleNwOutOverLimit = !broker.replicas().isEmpty() &&
-        clusterModel.potentialLeadershipLoadFor(broker.id()).expectedUtilizationFor(Resource.NW_OUT) > capacityLimit;
+    boolean estimatedMaxPossibleNwOutOverLimit = !broker.replicas().isEmpty()
+                                                 && clusterModel.potentialLeadershipLoadFor(broker.id())
+                                                                .expectedUtilizationFor(Resource.NW_OUT) > capacityLimit;
     if (!estimatedMaxPossibleNwOutOverLimit && !(_fixOfflineReplicasOnly && !broker.currentOfflineReplicas().isEmpty())) {
       // Estimated max possible utilization in broker is under the limit and there is no offline replica on broker.
       return;
     }
     // Get candidate brokers
-    Set<Broker> candidateBrokers = _fixOfflineReplicasOnly ?
-                                   clusterModel.aliveBrokers() : brokersUnderEstimatedMaxPossibleNwOut(clusterModel);
+    Set<Broker> candidateBrokers = _fixOfflineReplicasOnly ? clusterModel.aliveBrokers() : brokersUnderEstimatedMaxPossibleNwOut(clusterModel);
     // Attempt to move replicas to eligible brokers until either the estimated max possible network out
     // limit requirement is satisfied for the broker or all replicas are checked.
     for (Replica replica : broker.trackedSortedReplicas(replicaSortName(this, false, false)).sortedReplicas(true)) {
@@ -302,8 +297,8 @@ public class PotentialNwOutGoal extends AbstractGoal {
       if (destinationBroker != null) {
         int destinationBrokerId = destinationBroker.id();
         // Check if broker capacity limit is satisfied now.
-        estimatedMaxPossibleNwOutOverLimit = !broker.replicas().isEmpty() &&
-            clusterModel.potentialLeadershipLoadFor(broker.id()).expectedUtilizationFor(Resource.NW_OUT) > capacityLimit;
+        estimatedMaxPossibleNwOutOverLimit = !broker.replicas().isEmpty() && clusterModel.potentialLeadershipLoadFor(broker.id())
+                                                                                         .expectedUtilizationFor(Resource.NW_OUT) > capacityLimit;
         if (!estimatedMaxPossibleNwOutOverLimit && !(_fixOfflineReplicasOnly && !broker.currentOfflineReplicas().isEmpty())) {
           break;
         }

@@ -7,15 +7,12 @@ package com.linkedin.kafka.cruisecontrol.servlet.security;
 import com.linkedin.kafka.cruisecontrol.config.KafkaCruiseControlConfig;
 import com.linkedin.kafka.cruisecontrol.config.constants.WebServerConfig;
 import com.linkedin.kafka.cruisecontrol.servlet.CruiseControlEndPoint;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Set;
 import org.eclipse.jetty.security.ConstraintMapping;
 import org.eclipse.jetty.util.security.Constraint;
 
-import java.util.ArrayList;
-import java.util.Arrays;
-import java.util.Collections;
-import java.util.HashSet;
-import java.util.List;
-import java.util.Set;
 
 /**
  * <p>A base class that defines the default role structure for Cruise Control and can be used for implementing custom
@@ -49,7 +46,8 @@ public abstract class DefaultRoleSecurityProvider implements SecurityProvider {
     CruiseControlEndPoint.getEndpoints().forEach(ep -> {
       if (ep == CruiseControlEndPoint.KAFKA_CLUSTER_STATE
           || ep == CruiseControlEndPoint.USER_TASKS
-          || ep == CruiseControlEndPoint.REVIEW_BOARD) {
+          || ep == CruiseControlEndPoint.REVIEW_BOARD
+          || ep == CruiseControlEndPoint.PERMISSIONS) {
         constraintMappings.add(mapping(ep, VIEWER, USER, ADMIN));
       } else if (ep == CruiseControlEndPoint.BOOTSTRAP || ep == CruiseControlEndPoint.TRAIN) {
         constraintMappings.add(mapping(ep, ADMIN));
@@ -63,7 +61,7 @@ public abstract class DefaultRoleSecurityProvider implements SecurityProvider {
 
   @Override
   public Set<String> roles() {
-    return Collections.unmodifiableSet(new HashSet<>(Arrays.asList(VIEWER, USER, ADMIN)));
+    return Set.of(VIEWER, USER, ADMIN);
   }
 
   private ConstraintMapping mapping(CruiseControlEndPoint endpoint, String... roles) {

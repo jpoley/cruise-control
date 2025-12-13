@@ -10,7 +10,6 @@ import com.linkedin.cruisecontrol.metricdef.ValueComputingStrategy;
 import com.linkedin.kafka.cruisecontrol.common.Resource;
 import com.linkedin.kafka.cruisecontrol.metricsreporter.metric.RawMetricType;
 import java.util.ArrayList;
-import java.util.Arrays;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
@@ -48,8 +47,10 @@ public enum KafkaMetricDef {
   PRODUCE_RATE(AVG, COMMON, null, false),
   FETCH_RATE(AVG, COMMON, null, false),
   MESSAGE_IN_RATE(AVG, COMMON, null, false),
-  REPLICATION_BYTES_IN_RATE(AVG, COMMON, NW_IN, false), // Not available at topic level yet.
-  REPLICATION_BYTES_OUT_RATE(AVG, COMMON, NW_OUT, false), // Not available at topic level yet.
+  // Not available at topic level yet.
+  REPLICATION_BYTES_IN_RATE(AVG, COMMON, NW_IN, false),
+  // Not available at topic level yet.
+  REPLICATION_BYTES_OUT_RATE(AVG, COMMON, NW_OUT, false),
 
   BROKER_PRODUCE_REQUEST_RATE(AVG, BROKER_ONLY, null, false),
   BROKER_CONSUMER_FETCH_REQUEST_RATE(AVG, BROKER_ONLY, null, false),
@@ -104,8 +105,7 @@ public enum KafkaMetricDef {
   private final DefScope _defScope;
   private final boolean _toPredict;
   private static final Map<RawMetricType, KafkaMetricDef> TYPE_TO_DEF = new HashMap<>();
-  private static final List<KafkaMetricDef> CACHED_VALUES =
-      Collections.unmodifiableList(Arrays.asList(KafkaMetricDef.values()));
+  private static final List<KafkaMetricDef> CACHED_VALUES = List.of(KafkaMetricDef.values());
   private static final List<KafkaMetricDef> CACHED_COMMON_DEF_VALUES = buildCachedCommonDefValues();
   private static final List<KafkaMetricDef> CACHED_BROKER_DEF_VALUES = CACHED_VALUES;
   // Ensure that COMMON_METRIC_DEF and BROKER_METRIC_DEF are created after CACHED_COMMON_DEF_VALUES and CACHED_BROKER_DEF_VALUES
@@ -210,20 +210,19 @@ public enum KafkaMetricDef {
   }
 
   /**
-   * @see MetricDef
-   *
    * @return The metric group of the Kafka metric def.
+   * @see MetricDef
    */
   public String group() {
     return _group;
   }
 
   public static List<KafkaMetricDef> cachedCommonDefValues() {
-    return CACHED_COMMON_DEF_VALUES;
+    return Collections.unmodifiableList(CACHED_COMMON_DEF_VALUES);
   }
 
   public static List<KafkaMetricDef> cachedBrokerDefValues() {
-    return CACHED_BROKER_DEF_VALUES;
+    return Collections.unmodifiableList(CACHED_BROKER_DEF_VALUES);
   }
 
   public static KafkaMetricDef forRawMetricType(RawMetricType type) {

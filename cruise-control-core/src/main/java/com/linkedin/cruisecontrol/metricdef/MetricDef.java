@@ -133,6 +133,7 @@ public class MetricDef {
   }
 
   /**
+   * @param id The index corresponding to the requested {@link MetricInfo}.
    * @return The {@link MetricInfo} by id;
    */
   public MetricInfo metricInfo(short id) {
@@ -147,7 +148,7 @@ public class MetricDef {
    * @return A set of metric ids that are to be predicted.
    */
   public Set<Short> metricsToPredict() {
-    return _metricsToPredict;
+    return Collections.unmodifiableSet(_metricsToPredict);
   }
 
   public List<MetricInfo> all() {

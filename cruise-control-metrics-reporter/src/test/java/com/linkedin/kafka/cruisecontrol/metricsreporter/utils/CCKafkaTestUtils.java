@@ -6,6 +6,7 @@ package com.linkedin.kafka.cruisecontrol.metricsreporter.utils;
 
 import java.io.File;
 import java.io.IOException;
+import java.net.ServerSocket;
 import java.nio.file.Files;
 import java.util.ArrayList;
 import java.util.Collections;
@@ -21,7 +22,7 @@ import org.apache.kafka.clients.producer.KafkaProducer;
 import org.apache.kafka.clients.producer.ProducerConfig;
 
 
-public class CCKafkaTestUtils {
+public final class CCKafkaTestUtils {
   private static final AtomicBoolean SHUTDOWN_HOOK_INSTALLED = new AtomicBoolean(false);
   private static final Thread SHUTDOWN_HOOK;
   private static final List<File> FILES_TO_CLEAN_UP = Collections.synchronizedList(new ArrayList<>());
@@ -161,6 +162,32 @@ public class CCKafkaTestUtils {
     return stringBuiler.toString();
   }
 
+  /**
+   * Find a local port.
+   * @return A local port to use.
+   */
+  public static int findLocalPort() {
+    int port = -1;
+    while (port < 0) {
+      try {
+        ServerSocket socket = new ServerSocket(0);
+        socket.setReuseAddress(true);
+        port = socket.getLocalPort();
+        try {
+          socket.close();
+        } catch (IOException e) {
+          // Ignore IOException on close()
+        }
+      } catch (IOException ie) {
+        // let it go.
+      }
+    }
+    return port;
+  }
+
+  /**
+   * A functional interface for a task to run.
+   */
   @FunctionalInterface
   public interface Task {
     void run() throws Exception;

@@ -4,6 +4,7 @@
 package com.linkedin.cruisecontrol.common.config;
 
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.List;
 import java.util.Objects;
 
@@ -17,7 +18,7 @@ public class ConfigValue {
     private boolean _visible;
 
     public ConfigValue(String name) {
-        this(name, null, new ArrayList<>(), new ArrayList<String>());
+        this(name, null, new ArrayList<>(), new ArrayList<>());
     }
 
     public ConfigValue(String name, Object value, List<Object> recommendedValues, List<String> errorMessages) {
@@ -36,32 +37,32 @@ public class ConfigValue {
         return _value;
     }
 
-    public List<Object> recommendedValues() {
-        return _recommendedValues;
-    }
-
-    public List<String> errorMessages() {
-        return _errorMessages;
-    }
-
-    public boolean visible() {
-        return _visible;
-    }
-
     public void value(Object value) {
         this._value = value;
+    }
+
+    public List<Object> recommendedValues() {
+        return Collections.unmodifiableList(_recommendedValues);
     }
 
     public void recommendedValues(List<Object> recommendedValues) {
         this._recommendedValues = recommendedValues;
     }
 
-    public void addErrorMessage(String errorMessage) {
-        this._errorMessages.add(errorMessage);
+    public List<String> errorMessages() {
+        return Collections.unmodifiableList(_errorMessages);
+    }
+
+    public boolean visible() {
+        return _visible;
     }
 
     public void visible(boolean visible) {
         this._visible = visible;
+    }
+
+    public void addErrorMessage(String errorMessage) {
+        this._errorMessages.add(errorMessage);
     }
 
     @Override
@@ -73,11 +74,9 @@ public class ConfigValue {
             return false;
         }
         ConfigValue that = (ConfigValue) o;
-        return Objects.equals(_name, that._name) &&
-               Objects.equals(_value, that._value) &&
-               Objects.equals(_recommendedValues, that._recommendedValues) &&
-               Objects.equals(_errorMessages, that._errorMessages) &&
-               Objects.equals(_visible, that._visible);
+        return Objects.equals(_name, that._name) && Objects.equals(_value, that._value)
+               && Objects.equals(_recommendedValues, that._recommendedValues) && Objects.equals(_errorMessages, that._errorMessages)
+               && Objects.equals(_visible, that._visible);
     }
 
     @Override

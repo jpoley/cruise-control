@@ -10,6 +10,7 @@ import com.linkedin.kafka.cruisecontrol.servlet.parameters.DemoteBrokerParameter
 import java.util.Map;
 
 import static com.linkedin.kafka.cruisecontrol.servlet.parameters.ParameterUtils.DEMOTE_BROKER_PARAMETER_OBJECT_CONFIG;
+import static com.linkedin.cruisecontrol.common.utils.Utils.validateNotNull;
 
 
 public class DemoteRequest extends AbstractAsyncRequest {
@@ -23,7 +24,7 @@ public class DemoteRequest extends AbstractAsyncRequest {
   protected OperationFuture handle(String uuid) {
     OperationFuture future = new OperationFuture("Demote");
     pending(future.operationProgress());
-    _asyncKafkaCruiseControl.sessionExecutor().submit(new DemoteBrokerRunnable(_asyncKafkaCruiseControl, future, uuid, _parameters));
+    _asyncKafkaCruiseControl.sessionExecutor().execute(new DemoteBrokerRunnable(_asyncKafkaCruiseControl, future, uuid, _parameters));
     return future;
   }
 
@@ -40,9 +41,7 @@ public class DemoteRequest extends AbstractAsyncRequest {
   @Override
   public void configure(Map<String, ?> configs) {
     super.configure(configs);
-    _parameters = (DemoteBrokerParameters) configs.get(DEMOTE_BROKER_PARAMETER_OBJECT_CONFIG);
-    if (_parameters == null) {
-      throw new IllegalArgumentException("Parameter configuration is missing from the request.");
-    }
+    _parameters = (DemoteBrokerParameters) validateNotNull(configs.get(DEMOTE_BROKER_PARAMETER_OBJECT_CONFIG),
+            "Parameter configuration is missing from the request.");
   }
 }

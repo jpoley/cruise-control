@@ -11,12 +11,14 @@ import com.linkedin.kafka.cruisecontrol.analyzer.goals.DiskCapacityGoal;
 import com.linkedin.kafka.cruisecontrol.analyzer.goals.DiskUsageDistributionGoal;
 import com.linkedin.kafka.cruisecontrol.analyzer.goals.LeaderBytesInDistributionGoal;
 import com.linkedin.kafka.cruisecontrol.analyzer.goals.LeaderReplicaDistributionGoal;
+import com.linkedin.kafka.cruisecontrol.analyzer.goals.MinTopicLeadersPerBrokerGoal;
 import com.linkedin.kafka.cruisecontrol.analyzer.goals.NetworkInboundCapacityGoal;
 import com.linkedin.kafka.cruisecontrol.analyzer.goals.NetworkInboundUsageDistributionGoal;
 import com.linkedin.kafka.cruisecontrol.analyzer.goals.NetworkOutboundCapacityGoal;
 import com.linkedin.kafka.cruisecontrol.analyzer.goals.NetworkOutboundUsageDistributionGoal;
 import com.linkedin.kafka.cruisecontrol.analyzer.goals.PotentialNwOutGoal;
 import com.linkedin.kafka.cruisecontrol.analyzer.goals.PreferredLeaderElectionGoal;
+import com.linkedin.kafka.cruisecontrol.analyzer.goals.RackAwareDistributionGoal;
 import com.linkedin.kafka.cruisecontrol.analyzer.goals.RackAwareGoal;
 import com.linkedin.kafka.cruisecontrol.analyzer.goals.ReplicaCapacityGoal;
 import com.linkedin.kafka.cruisecontrol.analyzer.goals.ReplicaDistributionGoal;
@@ -27,7 +29,6 @@ import com.linkedin.kafka.cruisecontrol.config.constants.AnalyzerConfig;
 import com.linkedin.kafka.cruisecontrol.model.RandomCluster;
 import com.linkedin.kafka.cruisecontrol.common.TestConstants;
 import com.linkedin.kafka.cruisecontrol.model.ClusterModel;
-
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collection;
@@ -35,7 +36,6 @@ import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
-
 import java.util.Properties;
 import java.util.Random;
 import org.junit.Rule;
@@ -61,6 +61,28 @@ public class RandomGoalTest {
   public ExpectedException _expected = ExpectedException.none();
 
   private static final Random RANDOM = new Random(34534534);
+  private final Map<ClusterProperty, Number> _modifiedProperties;
+  private final List<String> _goalNameByPriority;
+  private final BalancingConstraint _balancingConstraint;
+  private final List<OptimizationVerifier.Verification> _verifications;
+
+  /**
+   * Constructor of Random Goal Test.
+   *
+   * @param modifiedProperties Modified cluster properties over the {@link TestConstants#BASE_PROPERTIES}.
+   * @param goalNameByPriority Goal name by priority.
+   * @param balancingConstraint the balancing constraints.
+   * @param verifications the verifications to make.
+   */
+  public RandomGoalTest(Map<ClusterProperty, Number> modifiedProperties,
+                        List<String> goalNameByPriority,
+                        BalancingConstraint balancingConstraint,
+                        List<OptimizationVerifier.Verification> verifications) {
+    _modifiedProperties = modifiedProperties;
+    _goalNameByPriority = goalNameByPriority;
+    _balancingConstraint = balancingConstraint;
+    _verifications = verifications;
+  }
 
   /**
    * Populate parameters for the {@link OptimizationVerifier}. All brokers are alive.
@@ -73,6 +95,8 @@ public class RandomGoalTest {
     Collection<Object[]> p = new ArrayList<>();
 
     List<String> goalsSortedByPriority = Arrays.asList(RackAwareGoal.class.getName(),
+                                                       RackAwareDistributionGoal.class.getName(),
+                                                       MinTopicLeadersPerBrokerGoal.class.getName(),
                                                        ReplicaCapacityGoal.class.getName(),
                                                        DiskCapacityGoal.class.getName(),
                                                        NetworkInboundCapacityGoal.class.getName(),
@@ -125,6 +149,8 @@ public class RandomGoalTest {
     List<String> shuffledSoftGoalNames = new ArrayList<>(goalsSortedByPriority);
     // Remove the hard goals.
     shuffledSoftGoalNames.remove(RackAwareGoal.class.getName());
+    shuffledSoftGoalNames.remove(RackAwareDistributionGoal.class.getName());
+    shuffledSoftGoalNames.remove(MinTopicLeadersPerBrokerGoal.class.getName());
     shuffledSoftGoalNames.remove(ReplicaCapacityGoal.class.getName());
     shuffledSoftGoalNames.remove(CpuCapacityGoal.class.getName());
     shuffledSoftGoalNames.remove(DiskCapacityGoal.class.getName());
@@ -136,36 +162,6 @@ public class RandomGoalTest {
     p.add(params(Collections.emptyMap(), randomOrderedSoftGoalsByPriority, balancingConstraint, verifications));
 
     return p;
-  }
-
-  private static Object[] params(Map<ClusterProperty, Number> modifiedProperties,
-                                 List<String> goalNameByPriority,
-                                 BalancingConstraint balancingConstraint,
-                                 List<OptimizationVerifier.Verification> verifications) {
-    return new Object[]{modifiedProperties, goalNameByPriority, balancingConstraint, verifications};
-  }
-
-  private Map<ClusterProperty, Number> _modifiedProperties;
-  private List<String> _goalNameByPriority;
-  private BalancingConstraint _balancingConstraint;
-  private List<OptimizationVerifier.Verification> _verifications;
-
-  /**
-   * Constructor of Random Goal Test.
-   *
-   * @param modifiedProperties Modified cluster properties over the {@link TestConstants#BASE_PROPERTIES}.
-   * @param goalNameByPriority Goal name by priority.
-   * @param balancingConstraint the balancing constraints.
-   * @param verifications the verifications to make.
-   */
-  public RandomGoalTest(Map<ClusterProperty, Number> modifiedProperties,
-                        List<String> goalNameByPriority,
-                        BalancingConstraint balancingConstraint,
-                        List<OptimizationVerifier.Verification> verifications) {
-    _modifiedProperties = modifiedProperties;
-    _goalNameByPriority = goalNameByPriority;
-    _balancingConstraint = balancingConstraint;
-    _verifications = verifications;
   }
 
   @Test
@@ -186,5 +182,12 @@ public class RandomGoalTest {
       assertTrue("IllegalArgumentException is expected for empty goal names.",
           OptimizationVerifier.executeGoalsFor(_balancingConstraint, clusterModel, _goalNameByPriority, _verifications));
     }
+  }
+
+  private static Object[] params(Map<ClusterProperty, Number> modifiedProperties,
+                                 List<String> goalNameByPriority,
+                                 BalancingConstraint balancingConstraint,
+                                 List<OptimizationVerifier.Verification> verifications) {
+    return new Object[]{modifiedProperties, goalNameByPriority, balancingConstraint, verifications};
   }
 }

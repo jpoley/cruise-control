@@ -17,7 +17,7 @@ import java.util.Map;
 @JsonResponseExternalFields(Resource.class)
 public class ClusterModelStatsValueHolder {
   @JsonResponseField
-  protected  static final String POTENTIAL_NW_OUT = "potentialNwOut";
+  protected static final String POTENTIAL_NW_OUT = "potentialNwOut";
   @JsonResponseField
   protected static final String LEADER_REPLICAS = "leaderReplicas";
   @JsonResponseField
@@ -44,7 +44,7 @@ public class ClusterModelStatsValueHolder {
 
   protected Map<String, Object> getJsonStructure() {
     List<Resource> cachedResources = Resource.cachedValues();
-    Map<String, Object> resourceMap = new HashMap<>(cachedResources.size() + 4);
+    Map<String, Object> resourceMap = new HashMap<>();
     for (Resource resource : cachedResources) {
       resourceMap.put(resource.resource(), _resourceUtilizationStats.get(resource));
     }

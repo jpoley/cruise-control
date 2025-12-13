@@ -11,8 +11,11 @@ import com.linkedin.kafka.cruisecontrol.analyzer.AnalyzerUtils;
 import com.linkedin.kafka.cruisecontrol.analyzer.BalancingConstraint;
 import com.linkedin.kafka.cruisecontrol.analyzer.BalancingAction;
 import com.linkedin.kafka.cruisecontrol.analyzer.ActionType;
+import com.linkedin.kafka.cruisecontrol.analyzer.ProvisionRecommendation;
+import com.linkedin.kafka.cruisecontrol.analyzer.ProvisionStatus;
 import com.linkedin.kafka.cruisecontrol.common.Resource;
 import com.linkedin.kafka.cruisecontrol.common.Statistic;
+import com.linkedin.kafka.cruisecontrol.exception.OptimizationFailureException;
 import com.linkedin.kafka.cruisecontrol.model.Broker;
 import com.linkedin.kafka.cruisecontrol.model.ClusterModel;
 import com.linkedin.kafka.cruisecontrol.model.ClusterModelStats;
@@ -20,13 +23,13 @@ import com.linkedin.kafka.cruisecontrol.model.Replica;
 import com.linkedin.kafka.cruisecontrol.model.ReplicaSortFunctionFactory;
 import com.linkedin.kafka.cruisecontrol.model.SortedReplicasHelper;
 import com.linkedin.kafka.cruisecontrol.monitor.ModelCompletenessRequirements;
-import java.util.Collection;
 import java.util.Comparator;
 import java.util.HashSet;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Set;
 import java.util.SortedSet;
+import java.util.TreeSet;
 import java.util.stream.Collectors;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -34,17 +37,24 @@ import org.slf4j.LoggerFactory;
 import static com.linkedin.kafka.cruisecontrol.analyzer.ActionAcceptance.ACCEPT;
 import static com.linkedin.kafka.cruisecontrol.analyzer.ActionAcceptance.REPLICA_REJECT;
 import static com.linkedin.kafka.cruisecontrol.analyzer.goals.GoalUtils.replicaSortName;
+import static com.linkedin.kafka.cruisecontrol.analyzer.goals.GoalUtils.DENOMINATOR_FOR_MIN_VALID_WINDOWS_FOR_SELF_HEALING;
+import static com.linkedin.kafka.cruisecontrol.analyzer.goals.GoalUtils.MIN_NUM_VALID_WINDOWS_FOR_SELF_HEALING;
 
 
 /**
  * Soft goal to distribute leader bytes evenly. This goal will not do any actual bytes movement; hence, it cannot be
  * used to fix offline replicas or decommission dead brokers.
+ *
+ * Warning: This custom goal does not take resource heterogeneity of inbound network capacity into account.
  */
 public class LeaderBytesInDistributionGoal extends AbstractGoal {
   private static final Logger LOG = LoggerFactory.getLogger(LeaderBytesInDistributionGoal.class);
 
+  // The balance limits are based on brokers not excluded for replica moves.
   private double _meanLeaderBytesIn;
   private Set<Integer> _overLimitBrokerIds;
+  // This is used to identify brokers not excluded for replica moves.
+  private Set<Integer> _brokersAllowedReplicaMove;
 
   public LeaderBytesInDistributionGoal() {
   }
@@ -124,12 +134,9 @@ public class LeaderBytesInDistributionGoal extends AbstractGoal {
 
   @Override
   public ModelCompletenessRequirements clusterModelCompletenessRequirements() {
-    return new ModelCompletenessRequirements(Math.max(1, _numWindows / 2), _minMonitoredPartitionPercentage, false);
-  }
-
-  @Override
-  public String name() {
-    return LeaderBytesInDistributionGoal.class.getSimpleName();
+    return new ModelCompletenessRequirements(Math.max(MIN_NUM_VALID_WINDOWS_FOR_SELF_HEALING,
+                                                      _numWindows / DENOMINATOR_FOR_MIN_VALID_WINDOWS_FOR_SELF_HEALING),
+                                             _minMonitoredPartitionPercentage, false);
   }
 
   @Override
@@ -140,12 +147,10 @@ public class LeaderBytesInDistributionGoal extends AbstractGoal {
   @Override
   protected SortedSet<Broker> brokersToBalance(ClusterModel clusterModel) {
     // Brokers having inbound network traffic over the balance threshold for inbound traffic are eligible for balancing.
-    SortedSet<Broker> brokersToBalance = clusterModel.brokers();
-    for (Iterator<Broker> iterator = brokersToBalance.iterator(); iterator.hasNext(); ) {
-      Broker broker = iterator.next();
-      double brokerUtilizationForNwIn = broker.leadershipLoadForNwResources().expectedUtilizationFor(Resource.NW_IN);
-      if (brokerUtilizationForNwIn <= balanceThreshold(clusterModel, broker.id())) {
-        iterator.remove();
+    SortedSet<Broker> brokersToBalance = new TreeSet<>();
+    for (Broker broker : clusterModel.brokers()) {
+      if (broker.leadershipLoadForNwResources().expectedUtilizationFor(Resource.NW_IN) > balanceThreshold(clusterModel, broker.id())) {
+        brokersToBalance.add(broker);
       }
     }
 
@@ -155,28 +160,36 @@ public class LeaderBytesInDistributionGoal extends AbstractGoal {
   @Override
   protected boolean selfSatisfied(ClusterModel clusterModel, BalancingAction action) {
     if (action.balancingAction() != ActionType.LEADERSHIP_MOVEMENT) {
-      throw new IllegalStateException("Found balancing action " + action.balancingAction() +
-          " but expected leadership movement.");
+      throw new IllegalStateException("Found balancing action " + action.balancingAction()
+                                      + " but expected leadership movement.");
     }
     return actionAcceptance(action, clusterModel) == ACCEPT;
   }
 
   @Override
-  protected void initGoalState(ClusterModel clusterModel, OptimizationOptions optimizationOptions) {
-    // While proposals exclude the excludedTopics, the leader bytes in still considers replicas of the excludedTopics.
+  protected void initGoalState(ClusterModel clusterModel, OptimizationOptions optimizationOptions)
+      throws OptimizationFailureException {
+    _brokersAllowedReplicaMove = GoalUtils.aliveBrokersNotExcludedForReplicaMove(clusterModel, optimizationOptions);
+    if (_brokersAllowedReplicaMove.isEmpty()) {
+      // Handle the case when all alive brokers are excluded from replica moves.
+      ProvisionRecommendation recommendation = new ProvisionRecommendation.Builder(ProvisionStatus.UNDER_PROVISIONED)
+          .numBrokers(clusterModel.maxReplicationFactor()).build();
+      throw new OptimizationFailureException(String.format("[%s] All alive brokers are excluded from replica moves.", name()), recommendation);
+    }
     _meanLeaderBytesIn = 0.0;
     _overLimitBrokerIds = new HashSet<>();
     // Sort leader replicas for each broker.
     Set<String> excludedTopics = optimizationOptions.excludedTopics();
     new SortedReplicasHelper().addSelectionFunc(ReplicaSortFunctionFactory.selectLeaders())
-                              .addSelectionFunc(ReplicaSortFunctionFactory.selectReplicasBasedOnExcludedTopics(excludedTopics))
+                              .maybeAddSelectionFunc(ReplicaSortFunctionFactory.selectReplicasBasedOnExcludedTopics(excludedTopics),
+                                                     !excludedTopics.isEmpty())
                               .setScoreFunc(ReplicaSortFunctionFactory.reverseSortByMetricGroupValue(Resource.NW_IN.toString()))
                               .trackSortedReplicasFor(replicaSortName(this, true, true), clusterModel);
   }
 
   @Override
   public void finish() {
-    _finished = true;
+    super.finish();
     // Clean up the memory
     _overLimitBrokerIds.clear();
   }
@@ -221,21 +234,10 @@ public class LeaderBytesInDistributionGoal extends AbstractGoal {
 
   private void initMeanLeaderBytesIn(ClusterModel clusterModel) {
     if (_meanLeaderBytesIn == 0.0) {
-      _meanLeaderBytesIn = meanLeaderResourceUtilization(clusterModel.brokers(), Resource.NW_IN);
+      double bytesIn = clusterModel.aliveBrokers().stream().mapToDouble(b -> b.leadershipLoadForNwResources()
+                                                                              .expectedUtilizationFor(Resource.NW_IN)).sum();
+      _meanLeaderBytesIn = bytesIn / _brokersAllowedReplicaMove.size();
     }
-  }
-
-  private static double meanLeaderResourceUtilization(Collection<Broker> brokers, Resource resource) {
-    double accumulator = 0.0;
-    int brokerCount = 0;
-    for (Broker broker : brokers) {
-      if (!broker.isAlive()) {
-        continue;
-      }
-      accumulator += broker.leadershipLoadForNwResources().expectedUtilizationFor(resource);
-      brokerCount++;
-    }
-    return accumulator / brokerCount;
   }
 
   /**

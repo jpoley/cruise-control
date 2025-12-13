@@ -5,6 +5,7 @@
 package com.linkedin.kafka.cruisecontrol.model;
 
 import com.linkedin.cruisecontrol.monitor.sampling.aggregator.AggregatedMetricValues;
+import com.linkedin.kafka.cruisecontrol.analyzer.OptimizationOptions;
 import com.linkedin.kafka.cruisecontrol.common.Resource;
 import com.linkedin.kafka.cruisecontrol.config.BrokerCapacityInfo;
 import java.io.IOException;
@@ -13,6 +14,7 @@ import java.io.Serializable;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.Collection;
+import java.util.Collections;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
@@ -56,22 +58,7 @@ public class Host implements Serializable {
   }
 
   public Set<Replica> replicas() {
-    return _replicas;
-  }
-
-  /**
-   * Get the number of replicas with the given topic name in this host.
-   *
-   * @param topic Name of the topic for which the number of replicas in this rack will be counted.
-   * @return Number of replicas with the given topic name in this host.
-   */
-  public int numTopicReplicas(String topic) {
-    int numTopicReplicas = 0;
-
-    for (Broker broker : _brokers.values()) {
-      numTopicReplicas += broker.numReplicasOfTopicInBroker(topic);
-    }
-    return numTopicReplicas;
+    return Collections.unmodifiableSet(_replicas);
   }
 
   /**
@@ -100,6 +87,23 @@ public class Host implements Serializable {
   public boolean isAlive() {
     for (Broker broker : _brokers.values()) {
       if (broker.isAlive()) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  /**
+   * Check whether the host is alive and allowed replica moves.
+   *
+   * @param optimizationOptions Options to retrieve excluded brokers for replica moves.
+   * @return Whether the host is alive and allowed replica moves. The host is alive and allowed replica moves as long as
+   * it has at least one broker alive which is not excluded for replica moves.
+   */
+  public boolean isAliveAndAllowedReplicaMoves(OptimizationOptions optimizationOptions) {
+    Set<Integer> excludedBrokers = optimizationOptions.excludedBrokersForReplicaMove();
+    for (Broker broker : _brokers.values()) {
+      if (broker.isAlive() && !excludedBrokers.contains(broker.id())) {
         return true;
       }
     }
@@ -156,6 +160,8 @@ public class Host implements Serializable {
 
   /**
    * Set broker state and update the capacity
+   * @param brokerId Broker id.
+   * @param newState The new state of the broker.
    */
   void setBrokerState(int brokerId, Broker.State newState) {
     Broker broker = broker(brokerId);

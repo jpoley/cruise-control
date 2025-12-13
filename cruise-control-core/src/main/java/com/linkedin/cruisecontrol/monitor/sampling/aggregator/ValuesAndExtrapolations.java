@@ -49,11 +49,11 @@ public class ValuesAndExtrapolations {
    * @return The {@link Extrapolation}s for the values if exist.
    */
   public Map<Integer, Extrapolation> extrapolations() {
-    return _extrapolations;
+    return Collections.unmodifiableMap(_extrapolations);
   }
 
   /**
-   * Get the window list for the metric values. The time window of metric value at <tt>index</tt> is the time window
+   * Get the window list for the metric values. The time window of metric value at {@code index} is the time window
    * at the same index of the array returned by this this method.
    *
    * @return The window time list associated with the metric values array in the {@link AggregatedMetricValues} returned
@@ -88,11 +88,11 @@ public class ValuesAndExtrapolations {
    * @return An empty ValuesAndExtrapolations.
    */
   static ValuesAndExtrapolations empty(int numWindows, MetricDef metricDef) {
-    Map<Short, MetricValues> values = new HashMap<>(metricDef.all().size());
-    for (short i = 0; i <  metricDef.all().size(); i++) {
+    Map<Short, MetricValues> values = new HashMap<>();
+    for (short i = 0; i < metricDef.all().size(); i++) {
       values.put(i, new MetricValues(numWindows));
     }
-    Map<Integer, Extrapolation> extrapolations = new HashMap<>(numWindows);
+    Map<Integer, Extrapolation> extrapolations = new HashMap<>();
     for (int i = 0; i < numWindows; i++) {
       extrapolations.put(i, Extrapolation.NO_VALID_EXTRAPOLATION);
     }

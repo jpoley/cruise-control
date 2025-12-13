@@ -18,6 +18,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Random;
 import java.util.Set;
+import java.util.concurrent.TimeUnit;
 import org.junit.Test;
 
 import static com.linkedin.cruisecontrol.monitor.sampling.aggregator.Extrapolation.FORCED_INSUFFICIENT;
@@ -35,7 +36,7 @@ import static org.junit.Assert.assertTrue;
 public class MetricSampleAggregatorTest {
   private static final float EPSILON = 0.01f;
   private static final int NUM_WINDOWS = 20;
-  private static final long WINDOW_MS = 1000L;
+  private static final long WINDOW_MS = TimeUnit.SECONDS.toMillis(1);
   private static final byte MIN_SAMPLES_PER_WINDOW = 4;
   private static final String ENTITY_GROUP_1 = "g1";
   private static final String ENTITY_GROUP_2 = "g2";
@@ -377,7 +378,7 @@ public class MetricSampleAggregatorTest {
                                      (byte) (samplesPerWindow * numThreads * (numRandomEntities / numEntities)),
                                      0, _metricDef);
 
-    final Random random = new Random();
+    final Random random = new Random(0xDEADBEEF);
     List<Thread> threads = new ArrayList<>();
     for (int i = 0; i < numThreads; i++) {
       Thread t = new Thread() {
@@ -426,6 +427,7 @@ public class MetricSampleAggregatorTest {
    * Entity 3: Invalid in window 3, 4 and 20
    *
    * Note that the first window index is 1.
+   * @return Metric sample aggregator.
    */
   private MetricSampleAggregator<String, IntegerEntity> prepareCompletenessTestEnv() {
     MetricSampleAggregator<String, IntegerEntity> aggregator =

@@ -139,8 +139,8 @@ public class MetricSampleCompleteness<G, E extends Entity<G>> extends LongGenera
   }
 
   /**
-   * Get the valid window indices. A window starts from <I><tt>(windowIndex - 1) * windowMs</tt></I> and ends at
-   * <I><tt>windowIndex * windowMs</tt></I>.
+   * Get the valid window indices. A window starts from <I>{@code (windowIndex - 1) * windowMs}</I> and ends at
+   * <I>{@code windowIndex * windowMs}</I>.
    * The entity and valid entity group ratio requirements can still meet the requirement after all these windows
    * are included.
    *
@@ -154,14 +154,14 @@ public class MetricSampleCompleteness<G, E extends Entity<G>> extends LongGenera
    * @return The set of valid entities based on the specified granularity.
    */
   public Set<E> validEntities() {
-    return _validEntities;
+    return Collections.unmodifiableSet(_validEntities);
   }
 
   /**
    * @return The set of valid entity groups.
    */
   public Set<G> validEntityGroups() {
-    return _validEntityGroups;
+    return Collections.unmodifiableSet(_validEntityGroups);
   }
 
   /**

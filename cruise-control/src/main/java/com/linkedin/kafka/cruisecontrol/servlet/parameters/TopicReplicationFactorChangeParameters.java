@@ -4,7 +4,7 @@
 
 package com.linkedin.kafka.cruisecontrol.servlet.parameters;
 
-import com.linkedin.kafka.cruisecontrol.config.constants.ExecutorConfig;
+import com.linkedin.kafka.cruisecontrol.executor.ConcurrencyType;
 import com.linkedin.kafka.cruisecontrol.executor.strategy.ReplicaMovementStrategy;
 import com.linkedin.kafka.cruisecontrol.servlet.UserRequestException;
 import java.io.UnsupportedEncodingException;
@@ -14,54 +14,51 @@ import java.util.SortedSet;
 import java.util.TreeSet;
 import java.util.regex.Pattern;
 
+import static com.linkedin.kafka.cruisecontrol.servlet.parameters.ParameterUtils.MAX_PARTITION_MOVEMENTS_IN_CLUSTER_PARAM;
 import static com.linkedin.kafka.cruisecontrol.servlet.parameters.ParameterUtils.TOPIC_PARAM;
 import static com.linkedin.kafka.cruisecontrol.servlet.parameters.ParameterUtils.REPLICATION_FACTOR_PARAM;
 import static com.linkedin.kafka.cruisecontrol.servlet.parameters.ParameterUtils.SKIP_RACK_AWARENESS_CHECK_PARAM;
-import static com.linkedin.kafka.cruisecontrol.servlet.parameters.ParameterUtils.DRY_RUN_PARAM;
 import static com.linkedin.kafka.cruisecontrol.servlet.parameters.ParameterUtils.SKIP_HARD_GOAL_CHECK_PARAM;
 import static com.linkedin.kafka.cruisecontrol.servlet.parameters.ParameterUtils.CONCURRENT_LEADER_MOVEMENTS_PARAM;
+import static com.linkedin.kafka.cruisecontrol.servlet.parameters.ParameterUtils.BROKER_CONCURRENT_LEADER_MOVEMENTS_PARAM;
 import static com.linkedin.kafka.cruisecontrol.servlet.parameters.ParameterUtils.EXECUTION_PROGRESS_CHECK_INTERVAL_MS_PARAM;
 import static com.linkedin.kafka.cruisecontrol.servlet.parameters.ParameterUtils.CONCURRENT_PARTITION_MOVEMENTS_PER_BROKER_PARAM;
 import static com.linkedin.kafka.cruisecontrol.servlet.parameters.ParameterUtils.REPLICA_MOVEMENT_STRATEGIES_PARAM;
 import static com.linkedin.kafka.cruisecontrol.servlet.parameters.ParameterUtils.REPLICATION_THROTTLE_PARAM;
-import static com.linkedin.kafka.cruisecontrol.servlet.parameters.ParameterUtils.REASON_PARAM;
-import static com.linkedin.kafka.cruisecontrol.servlet.parameters.ParameterUtils.STOP_ONGOING_EXECUTION_PARAM;
 
 
 /**
  * Optional parameters for {@link com.linkedin.kafka.cruisecontrol.servlet.CruiseControlEndPoint#TOPIC_CONFIGURATION}.
  * This class holds all the request parameters for {@link TopicConfigurationParameters.TopicConfigurationType#REPLICATION_FACTOR}.
  */
-public class TopicReplicationFactorChangeParameters extends GoalBasedOptimizationParameters {
+public class TopicReplicationFactorChangeParameters extends AbstractParameters {
   protected static final SortedSet<String> CASE_INSENSITIVE_PARAMETER_NAMES;
   static {
     SortedSet<String> validParameterNames = new TreeSet<>(String.CASE_INSENSITIVE_ORDER);
     validParameterNames.add(TOPIC_PARAM);
     validParameterNames.add(REPLICATION_FACTOR_PARAM);
     validParameterNames.add(SKIP_RACK_AWARENESS_CHECK_PARAM);
-    validParameterNames.add(DRY_RUN_PARAM);
-    validParameterNames.add(REASON_PARAM);
     validParameterNames.add(CONCURRENT_PARTITION_MOVEMENTS_PER_BROKER_PARAM);
+    validParameterNames.add(MAX_PARTITION_MOVEMENTS_IN_CLUSTER_PARAM);
     validParameterNames.add(CONCURRENT_LEADER_MOVEMENTS_PARAM);
+    validParameterNames.add(BROKER_CONCURRENT_LEADER_MOVEMENTS_PARAM);
     validParameterNames.add(EXECUTION_PROGRESS_CHECK_INTERVAL_MS_PARAM);
     validParameterNames.add(SKIP_HARD_GOAL_CHECK_PARAM);
     validParameterNames.add(REPLICA_MOVEMENT_STRATEGIES_PARAM);
     validParameterNames.add(REPLICATION_THROTTLE_PARAM);
-    validParameterNames.add(STOP_ONGOING_EXECUTION_PARAM);
-    validParameterNames.addAll(GoalBasedOptimizationParameters.CASE_INSENSITIVE_PARAMETER_NAMES);
+    validParameterNames.addAll(AbstractParameters.CASE_INSENSITIVE_PARAMETER_NAMES);
     CASE_INSENSITIVE_PARAMETER_NAMES = Collections.unmodifiableSortedSet(validParameterNames);
   }
   protected Map<Short, Pattern> _topicPatternByReplicationFactor;
   protected boolean _skipRackAwarenessCheck;
-  protected boolean _dryRun;
   protected Integer _concurrentInterBrokerPartitionMovements;
-  protected Integer _concurrentLeaderMovements;
+  protected Integer _maxInterBrokerPartitionMovements;
+  protected Integer _clusterLeaderMovementConcurrency;
+  protected Integer _brokerLeaderMovementConcurrency;
   protected Long _executionProgressCheckIntervalMs;
   protected boolean _skipHardGoalCheck;
   protected ReplicaMovementStrategy _replicaMovementStrategy;
   protected Long _replicationThrottle;
-  protected String _reason;
-  protected boolean _stopOngoingExecution;
 
   protected TopicReplicationFactorChangeParameters() {
     super();
@@ -70,24 +67,19 @@ public class TopicReplicationFactorChangeParameters extends GoalBasedOptimizatio
   @Override
   protected void initParameters() throws UnsupportedEncodingException {
     super.initParameters();
-    _topicPatternByReplicationFactor = ParameterUtils.topicPatternByReplicationFactor(_request);
+    _topicPatternByReplicationFactor = ParameterUtils.topicPatternByReplicationFactor(_requestContext);
     if (_topicPatternByReplicationFactor.keySet().stream().anyMatch(rf -> rf < 1)) {
       throw new UserRequestException("Target replication factor cannot be set to smaller than 1.");
     }
-    _skipRackAwarenessCheck = ParameterUtils.skipRackAwarenessCheck(_request);
-    _dryRun = ParameterUtils.getDryRun(_request);
-    _concurrentInterBrokerPartitionMovements = ParameterUtils.concurrentMovements(_request, true, false);
-    _concurrentLeaderMovements = ParameterUtils.concurrentMovements(_request, false, false);
-    _executionProgressCheckIntervalMs = ParameterUtils.executionProgressCheckIntervalMs(_request);
-    _skipHardGoalCheck = ParameterUtils.skipHardGoalCheck(_request);
-    _replicaMovementStrategy = ParameterUtils.getReplicaMovementStrategy(_request, _config);
-    _replicationThrottle = ParameterUtils.replicationThrottle(_request, _config);
-    boolean requestReasonRequired = _config.getBoolean(ExecutorConfig.REQUEST_REASON_REQUIRED_CONFIG);
-    _reason = ParameterUtils.reason(_request, requestReasonRequired && !_dryRun);
-    _stopOngoingExecution = ParameterUtils.stopOngoingExecution(_request);
-    if (_stopOngoingExecution && _dryRun) {
-      throw new UserRequestException(String.format("%s and %s cannot both be set to true.", STOP_ONGOING_EXECUTION_PARAM, DRY_RUN_PARAM));
-    }
+    _skipRackAwarenessCheck = ParameterUtils.skipRackAwarenessCheck(_requestContext);
+    _concurrentInterBrokerPartitionMovements = ParameterUtils.concurrentMovements(_requestContext, ConcurrencyType.INTER_BROKER_REPLICA);
+    _maxInterBrokerPartitionMovements = ParameterUtils.maxPartitionMovements(_requestContext);
+    _clusterLeaderMovementConcurrency = ParameterUtils.concurrentMovements(_requestContext, ConcurrencyType.LEADERSHIP_CLUSTER);
+    _brokerLeaderMovementConcurrency = ParameterUtils.concurrentMovements(_requestContext, ConcurrencyType.LEADERSHIP_BROKER);
+    _executionProgressCheckIntervalMs = ParameterUtils.executionProgressCheckIntervalMs(_requestContext);
+    _skipHardGoalCheck = ParameterUtils.skipHardGoalCheck(_requestContext);
+    _replicaMovementStrategy = ParameterUtils.getReplicaMovementStrategy(_requestContext, _config);
+    _replicationThrottle = ParameterUtils.replicationThrottle(_requestContext, _config);
   }
 
   /**
@@ -110,27 +102,31 @@ public class TopicReplicationFactorChangeParameters extends GoalBasedOptimizatio
   }
 
   public Map<Short, Pattern> topicPatternByReplicationFactor() {
-    return _topicPatternByReplicationFactor;
+    return Collections.unmodifiableMap(_topicPatternByReplicationFactor);
   }
 
   public boolean skipRackAwarenessCheck() {
     return _skipRackAwarenessCheck;
   }
 
-  public boolean dryRun() {
-    return _dryRun;
-  }
-
   public Integer concurrentInterBrokerPartitionMovements() {
     return _concurrentInterBrokerPartitionMovements;
+  }
+
+  public Integer maxInterBrokerPartitionMovements() {
+    return _maxInterBrokerPartitionMovements;
   }
 
   public Long executionProgressCheckIntervalMs() {
     return _executionProgressCheckIntervalMs;
   }
 
-  public Integer concurrentLeaderMovements() {
-    return _concurrentLeaderMovements;
+  public Integer clusterLeaderMovementConcurrency() {
+    return _clusterLeaderMovementConcurrency;
+  }
+
+  public Integer brokerLeaderMovementConcurrency() {
+    return _brokerLeaderMovementConcurrency;
   }
 
   public boolean skipHardGoalCheck() {
@@ -143,14 +139,6 @@ public class TopicReplicationFactorChangeParameters extends GoalBasedOptimizatio
 
   public Long replicationThrottle() {
     return _replicationThrottle;
-  }
-
-  public String reason() {
-    return _reason;
-  }
-
-  public boolean stopOngoingExecution() {
-    return _stopOngoingExecution;
   }
 
   @Override

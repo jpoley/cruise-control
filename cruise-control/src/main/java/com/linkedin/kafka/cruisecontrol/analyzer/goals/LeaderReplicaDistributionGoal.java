@@ -32,6 +32,7 @@ import org.slf4j.LoggerFactory;
 
 import static com.linkedin.kafka.cruisecontrol.analyzer.ActionAcceptance.ACCEPT;
 import static com.linkedin.kafka.cruisecontrol.analyzer.ActionAcceptance.REPLICA_REJECT;
+import static com.linkedin.kafka.cruisecontrol.analyzer.goals.GoalUtils.remainingTimeMs;
 import static com.linkedin.kafka.cruisecontrol.analyzer.goals.GoalUtils.replicaSortName;
 import static com.linkedin.kafka.cruisecontrol.analyzer.goals.ReplicaDistributionAbstractGoal.ChangeType.*;
 
@@ -55,6 +56,7 @@ public class LeaderReplicaDistributionGoal extends ReplicaDistributionAbstractGo
 
   /**
    * Package private for unit test.
+   * @param balancingConstraint Balancing constraint.
    */
   public LeaderReplicaDistributionGoal(BalancingConstraint balancingConstraint) {
     this();
@@ -68,7 +70,7 @@ public class LeaderReplicaDistributionGoal extends ReplicaDistributionAbstractGo
 
   /**
    * The rebalance threshold for this goal is set by
-   * {@link com.linkedin.kafka.cruisecontrol.config.KafkaCruiseControlConfig#LEADER_REPLICA_COUNT_BALANCE_THRESHOLD_CONFIG}
+   * {@link com.linkedin.kafka.cruisecontrol.config.constants.AnalyzerConfig#LEADER_REPLICA_COUNT_BALANCE_THRESHOLD_CONFIG}
    */
   @Override
   double balancePercentage() {
@@ -77,7 +79,7 @@ public class LeaderReplicaDistributionGoal extends ReplicaDistributionAbstractGo
 
   /**
    * Check whether the given action is acceptable by this goal. An action is acceptable if the number of leader replicas at
-   * (1) the broker which gives away leader replica does not go under the allowed limit.
+   * (1) the broker which gives away leader replica does not go under the allowed limit -- unless it is excluded for replica moves.
    * (2) the broker which receives leader replica does not go over the allowed limit.
    *
    * @param action Action to be checked for acceptance.
@@ -113,18 +115,14 @@ public class LeaderReplicaDistributionGoal extends ReplicaDistributionAbstractGo
 
   private ActionAcceptance isLeaderMovementSatisfiable(Broker sourceBroker, Broker destinationBroker) {
     return (isReplicaCountUnderBalanceUpperLimitAfterChange(destinationBroker, destinationBroker.leaderReplicas().size(), ADD)
-           && isReplicaCountAboveBalanceLowerLimitAfterChange(sourceBroker, sourceBroker.leaderReplicas().size(), REMOVE))
+           && (isExcludedForReplicaMove(sourceBroker)
+               || isReplicaCountAboveBalanceLowerLimitAfterChange(sourceBroker, sourceBroker.leaderReplicas().size(), REMOVE)))
            ? ACCEPT : REPLICA_REJECT;
   }
 
   @Override
   public ClusterModelStatsComparator clusterModelStatsComparator() {
     return new LeaderReplicaDistributionGoalStatsComparator();
-  }
-
-  @Override
-  public String name() {
-    return LeaderReplicaDistributionGoal.class.getSimpleName();
   }
 
   /**
@@ -142,8 +140,9 @@ public class LeaderReplicaDistributionGoal extends ReplicaDistributionAbstractGo
                                     OptimizationOptions optimizationOptions) {
     LOG.debug("Rebalancing broker {} [limits] lower: {} upper: {}.", broker.id(), _balanceLowerLimit, _balanceUpperLimit);
     int numLeaderReplicas = broker.leaderReplicas().size();
-    boolean requireLessLeaderReplicas = broker.isAlive() && numLeaderReplicas > _balanceUpperLimit;
-    boolean requireMoreLeaderReplicas = broker.isAlive() && numLeaderReplicas < _balanceLowerLimit;
+    boolean isExcludedForReplicaMove = isExcludedForReplicaMove(broker);
+    boolean requireLessLeaderReplicas = broker.isAlive() && numLeaderReplicas > (isExcludedForReplicaMove ? 0 : _balanceUpperLimit);
+    boolean requireMoreLeaderReplicas = !isExcludedForReplicaMove && broker.isAlive() && numLeaderReplicas < _balanceLowerLimit;
     boolean requireLessReplicas = _fixOfflineReplicasOnly && broker.currentOfflineReplicas().size() > 0;
     // Update broker ids over the balance limit for logging purposes.
     if (((requireLessLeaderReplicas
@@ -168,23 +167,36 @@ public class LeaderReplicaDistributionGoal extends ReplicaDistributionAbstractGo
                                                  ClusterModel clusterModel,
                                                  Set<Goal> optimizedGoals,
                                                  OptimizationOptions optimizationOptions) {
+    long moveStartTimeMs = System.currentTimeMillis();
     if (!clusterModel.deadBrokers().isEmpty()) {
       return true;
     }
+    // If the source broker is excluded for replica move, set its upper limit to 0.
+    int balanceUpperLimitForSourceBroker = isExcludedForReplicaMove(broker) ? 0 : _balanceUpperLimit;
     int numLeaderReplicas = broker.leaderReplicas().size();
-    for (Replica replica : new HashSet<>(broker.leaderReplicas())) {
-      Set<Broker> candidateBrokers = clusterModel.partition(replica.topicPartition()).partitionBrokers().stream()
-                                                 .filter(b -> b != broker && !b.replica(replica.topicPartition()).isCurrentOffline())
+    Set<String> excludedTopics = optimizationOptions.excludedTopics();
+    boolean fastMode = optimizationOptions.fastMode();
+    for (Replica leader : new HashSet<>(broker.leaderReplicas())) {
+      if (fastMode && remainingTimeMs(_balancingConstraint.fastModePerBrokerMoveTimeoutMs(), moveStartTimeMs) <= 0) {
+        LOG.debug("Move leadership out timeout in fast mode for broker {}.", broker.id());
+        break;
+      }
+      if (excludedTopics.contains(leader.topicPartition().topic())) {
+        continue;
+      }
+
+      Set<Broker> candidateBrokers = clusterModel.partition(leader.topicPartition()).partitionBrokers().stream()
+                                                 .filter(b -> b != broker && !b.replica(leader.topicPartition()).isCurrentOffline())
                                                  .collect(Collectors.toSet());
       Broker b = maybeApplyBalancingAction(clusterModel,
-                                           replica,
+                                           leader,
                                            candidateBrokers,
                                            ActionType.LEADERSHIP_MOVEMENT,
                                            optimizedGoals,
                                            optimizationOptions);
       // Only check if we successfully moved something.
       if (b != null) {
-        if (--numLeaderReplicas <= _balanceUpperLimit) {
+        if (--numLeaderReplicas <= balanceUpperLimitForSourceBroker) {
           return false;
         }
       }
@@ -196,15 +208,21 @@ public class LeaderReplicaDistributionGoal extends ReplicaDistributionAbstractGo
                                                 ClusterModel clusterModel,
                                                 Set<Goal> optimizedGoals,
                                                 OptimizationOptions optimizationOptions) {
-    if (!clusterModel.deadBrokers().isEmpty() ||
-        optimizationOptions.excludedBrokersForLeadership().contains(broker.id())) {
+    long moveStartTimeMs = System.currentTimeMillis();
+    if (!clusterModel.deadBrokers().isEmpty() || optimizationOptions.excludedBrokersForLeadership().contains(broker.id())) {
       return true;
     }
 
     int numLeaderReplicas = broker.leaderReplicas().size();
-    Set<Broker> candidateBrokers =  Collections.singleton(broker);
+    Set<Broker> candidateBrokers = Collections.singleton(broker);
+    Set<String> excludedTopics = optimizationOptions.excludedTopics();
+    boolean fastMode = optimizationOptions.fastMode();
     for (Replica replica : broker.replicas()) {
-      if (replica.isLeader() || replica.isCurrentOffline()) {
+      if (fastMode && remainingTimeMs(_balancingConstraint.fastModePerBrokerMoveTimeoutMs(), moveStartTimeMs) <= 0) {
+        LOG.debug("Move leadership in timeout in fast mode for broker {}.", broker.id());
+        break;
+      }
+      if (replica.isLeader() || replica.isCurrentOffline() || excludedTopics.contains(replica.topicPartition().topic())) {
         continue;
       }
       Broker b = maybeApplyBalancingAction(clusterModel,
@@ -227,6 +245,7 @@ public class LeaderReplicaDistributionGoal extends ReplicaDistributionAbstractGo
                                                ClusterModel clusterModel,
                                                Set<Goal> optimizedGoals,
                                                OptimizationOptions optimizationOptions) {
+    long moveStartTimeMs = System.currentTimeMillis();
     // Get the eligible brokers.
     SortedSet<Broker> candidateBrokers;
     if (_fixOfflineReplicasOnly) {
@@ -250,11 +269,17 @@ public class LeaderReplicaDistributionGoal extends ReplicaDistributionAbstractGo
                               .maybeAddSelectionFunc(ReplicaSortFunctionFactory.selectImmigrants(),
                                                      (!_fixOfflineReplicasOnly && !clusterModel.selfHealingEligibleReplicas().isEmpty())
                                                      || optimizationOptions.onlyMoveImmigrantReplicas())
-                              .addSelectionFunc(ReplicaSortFunctionFactory.selectReplicasBasedOnExcludedTopics(excludedTopics))
+                              .maybeAddSelectionFunc(ReplicaSortFunctionFactory.selectReplicasBasedOnExcludedTopics(excludedTopics),
+                                                     !excludedTopics.isEmpty())
                               .trackSortedReplicasFor(replicaSortName, broker);
     SortedSet<Replica> candidateReplicas = broker.trackedSortedReplicas(replicaSortName).sortedReplicas(true);
     int numReplicas = candidateReplicas.size();
+    boolean fastMode = optimizationOptions.fastMode();
     for (Replica replica : candidateReplicas) {
+      if (fastMode && !replica.isCurrentOffline() && remainingTimeMs(_balancingConstraint.fastModePerBrokerMoveTimeoutMs(), moveStartTimeMs) <= 0) {
+        LOG.debug("Move replicas out timeout in fast mode for broker {}.", broker.id());
+        break;
+      }
       Broker b = maybeApplyBalancingAction(clusterModel,
                                            replica,
                                            candidateBrokers,
@@ -282,6 +307,7 @@ public class LeaderReplicaDistributionGoal extends ReplicaDistributionAbstractGo
                                                     ClusterModel clusterModel,
                                                     Set<Goal> optimizedGoals,
                                                     OptimizationOptions optimizationOptions) {
+    long moveStartTimeMs = System.currentTimeMillis();
     if (optimizationOptions.excludedBrokersForLeadership().contains(broker.id())) {
       return true;
     }
@@ -303,10 +329,16 @@ public class LeaderReplicaDistributionGoal extends ReplicaDistributionAbstractGo
     new SortedReplicasHelper().addSelectionFunc(ReplicaSortFunctionFactory.selectLeaders())
                               .maybeAddSelectionFunc(ReplicaSortFunctionFactory.selectImmigrants(),
                                                      !clusterModel.brokenBrokers().isEmpty() || onlyMoveImmigrantReplicas)
-                              .addSelectionFunc(ReplicaSortFunctionFactory.selectReplicasBasedOnExcludedTopics(excludedTopics))
+                              .maybeAddSelectionFunc(ReplicaSortFunctionFactory.selectReplicasBasedOnExcludedTopics(excludedTopics),
+                                                     !excludedTopics.isEmpty())
                               .trackSortedReplicasFor(replicaSortName, clusterModel);
     int numLeaderReplicas = broker.leaderReplicas().size();
+    boolean fastMode = optimizationOptions.fastMode();
     while (!eligibleBrokers.isEmpty()) {
+      if (fastMode && remainingTimeMs(_balancingConstraint.fastModePerBrokerMoveTimeoutMs(), moveStartTimeMs) <= 0) {
+        LOG.debug("Move leaders in timeout in fast mode for broker {}.", broker.id());
+        break;
+      }
       Broker sourceBroker = eligibleBrokers.poll();
       for (Replica replica : sourceBroker.trackedSortedReplicas(replicaSortName).sortedReplicas(true)) {
         Broker b = maybeApplyBalancingAction(clusterModel,

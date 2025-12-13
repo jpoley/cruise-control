@@ -15,18 +15,18 @@ import java.util.SortedSet;
 import java.util.TreeSet;
 import java.util.regex.Pattern;
 
-import static com.linkedin.kafka.cruisecontrol.servlet.parameters.ParameterUtils.RESOURCE_PARAM;
-import static com.linkedin.kafka.cruisecontrol.servlet.parameters.ParameterUtils.START_MS_PARAM;
+import static com.linkedin.kafka.cruisecontrol.servlet.parameters.ParameterUtils.ALLOW_CAPACITY_ESTIMATION_PARAM;
+import static com.linkedin.kafka.cruisecontrol.servlet.parameters.ParameterUtils.AVG_LOAD_PARAM;
+import static com.linkedin.kafka.cruisecontrol.servlet.parameters.ParameterUtils.BROKER_ID_PARAM;
 import static com.linkedin.kafka.cruisecontrol.servlet.parameters.ParameterUtils.END_MS_PARAM;
 import static com.linkedin.kafka.cruisecontrol.servlet.parameters.ParameterUtils.ENTRIES_PARAM;
-import static com.linkedin.kafka.cruisecontrol.servlet.parameters.ParameterUtils.ALLOW_CAPACITY_ESTIMATION_PARAM;
 import static com.linkedin.kafka.cruisecontrol.servlet.parameters.ParameterUtils.MAX_LOAD_PARAM;
-import static com.linkedin.kafka.cruisecontrol.servlet.parameters.ParameterUtils.AVG_LOAD_PARAM;
-import static com.linkedin.kafka.cruisecontrol.servlet.parameters.ParameterUtils.TOPIC_PARAM;
-import static com.linkedin.kafka.cruisecontrol.servlet.parameters.ParameterUtils.PARTITION_PARAM;
 import static com.linkedin.kafka.cruisecontrol.servlet.parameters.ParameterUtils.MIN_VALID_PARTITION_RATIO_PARAM;
-import static com.linkedin.kafka.cruisecontrol.servlet.parameters.ParameterUtils.BROKER_ID_PARAM;
-
+import static com.linkedin.kafka.cruisecontrol.servlet.parameters.ParameterUtils.PARTITION_PARAM;
+import static com.linkedin.kafka.cruisecontrol.servlet.parameters.ParameterUtils.REASON_PARAM;
+import static com.linkedin.kafka.cruisecontrol.servlet.parameters.ParameterUtils.RESOURCE_PARAM;
+import static com.linkedin.kafka.cruisecontrol.servlet.parameters.ParameterUtils.START_MS_PARAM;
+import static com.linkedin.kafka.cruisecontrol.servlet.parameters.ParameterUtils.TOPIC_PARAM;
 
 /**
  * Parameters for {@link CruiseControlEndPoint#PARTITION_LOAD}
@@ -38,7 +38,7 @@ import static com.linkedin.kafka.cruisecontrol.servlet.parameters.ParameterUtils
  *    &amp;entries=[number-of-entries-to-show]&amp;topic=[topic]&amp;partition=[partition/start_partition-end_partition]
  *    &amp;min_valid_partition_ratio=[min_valid_partition_ratio]&amp;allow_capacity_estimation=[true/false]
  *    &amp;max_load=[true/false]&amp;avg_load=[true/false]&amp;json=[true/false]&amp;brokerid=[brokerid]
- *    &amp;get_response_schema=[true/false]
+ *    &amp;get_response_schema=[true/false]&amp;doAs=[user]&amp;reason=[reason-for-request]
  * </pre>
  */
 public class PartitionLoadParameters extends AbstractParameters {
@@ -56,6 +56,7 @@ public class PartitionLoadParameters extends AbstractParameters {
     validParameterNames.add(MAX_LOAD_PARAM);
     validParameterNames.add(AVG_LOAD_PARAM);
     validParameterNames.add(BROKER_ID_PARAM);
+    validParameterNames.add(REASON_PARAM);
     validParameterNames.addAll(AbstractParameters.CASE_INSENSITIVE_PARAMETER_NAMES);
     CASE_INSENSITIVE_PARAMETER_NAMES = Collections.unmodifiableSortedSet(validParameterNames);
   }
@@ -79,28 +80,29 @@ public class PartitionLoadParameters extends AbstractParameters {
   @Override
   protected void initParameters() throws UnsupportedEncodingException {
     super.initParameters();
-    String resourceString = ParameterUtils.resourceString(_request);
+    String resourceString = ParameterUtils.resourceString(_requestContext);
     try {
       _resource = Resource.valueOf(resourceString.toUpperCase());
     } catch (IllegalArgumentException iae) {
-      throw new UserRequestException(String.format("Invalid resource type %s. The resource type must be one of the"
+      throw new UserRequestException(String.format("Invalid resource type %s. The resource type must be one of the "
                                                    + "following: CPU, DISK, NW_IN, NW_OUT", resourceString));
     }
 
-    _wantMaxLoad = ParameterUtils.wantMaxLoad(_request);
-    _wantAvgLoad = ParameterUtils.wantAvgLoad(_request);
+    _wantMaxLoad = ParameterUtils.wantMaxLoad(_requestContext);
+    _wantAvgLoad = ParameterUtils.wantAvgLoad(_requestContext);
     if (_wantMaxLoad && _wantAvgLoad) {
       throw new UserRequestException("Parameters to ask for max and avg load are mutually exclusive to each other.");
     }
-    _topic = ParameterUtils.topic(_request);
-    _startMs = ParameterUtils.startMs(_request);
-    _endMs = ParameterUtils.endMs(_request);
-    _partitionLowerBoundary = ParameterUtils.partitionBoundary(_request, false);
-    _partitionUpperBoundary = ParameterUtils.partitionBoundary(_request, true);
-    _entries = ParameterUtils.entries(_request);
-    _minValidPartitionRatio = ParameterUtils.minValidPartitionRatio(_request);
-    _allowCapacityEstimation = ParameterUtils.allowCapacityEstimation(_request);
-    _brokerIds = ParameterUtils.brokerIds(_request, true);
+    _topic = ParameterUtils.topic(_requestContext);
+    _partitionLowerBoundary = ParameterUtils.partitionBoundary(_requestContext, false);
+    _partitionUpperBoundary = ParameterUtils.partitionBoundary(_requestContext, true);
+    _entries = ParameterUtils.entries(_requestContext);
+    _minValidPartitionRatio = ParameterUtils.minValidPartitionRatio(_requestContext);
+    _allowCapacityEstimation = ParameterUtils.allowCapacityEstimation(_requestContext);
+    _brokerIds = ParameterUtils.brokerIds(_requestContext, true);
+    _startMs = ParameterUtils.startMsOrDefault(_requestContext, ParameterUtils.DEFAULT_START_TIME_FOR_CLUSTER_MODEL);
+    _endMs = ParameterUtils.endMsOrDefault(_requestContext, System.currentTimeMillis());
+    ParameterUtils.validateTimeRange(_startMs, _endMs);
   }
 
   public Resource resource() {
@@ -148,7 +150,7 @@ public class PartitionLoadParameters extends AbstractParameters {
   }
 
   public Set<Integer> brokerIds() {
-    return _brokerIds;
+    return Collections.unmodifiableSet(_brokerIds);
   }
 
   @Override

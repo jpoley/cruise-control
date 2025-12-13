@@ -6,7 +6,6 @@ package com.linkedin.kafka.cruisecontrol.model;
 
 import com.linkedin.cruisecontrol.monitor.sampling.aggregator.AggregatedMetricValues;
 import com.linkedin.kafka.cruisecontrol.common.Resource;
-
 import com.linkedin.kafka.cruisecontrol.config.BrokerCapacityInfo;
 import java.io.IOException;
 import java.io.OutputStream;
@@ -24,8 +23,9 @@ import java.util.Set;
 import java.util.SortedMap;
 import java.util.TreeMap;
 import java.util.function.Function;
-
 import org.apache.kafka.common.TopicPartition;
+
+import static com.linkedin.cruisecontrol.common.utils.Utils.validateNotNull;
 
 /**
  * A class that holds the information of the broker, including its liveness and load for replicas. A broker object is
@@ -65,10 +65,8 @@ public class Broker implements Serializable, Comparable<Broker> {
    * @param populateReplicaPlacementInfo Whether populate replica placement over disk information or not.
    */
   Broker(Host host, int id, BrokerCapacityInfo brokerCapacityInfo, boolean populateReplicaPlacementInfo) {
-    Map<Resource, Double> brokerCapacity = brokerCapacityInfo.capacity();
-    if (brokerCapacity == null) {
-      throw new IllegalArgumentException("Attempt to create broker " + id + " on host " + host.name() + " with null capacity.");
-    }
+    Map<Resource, Double> brokerCapacity = validateNotNull(brokerCapacityInfo.capacity(),
+            () -> "Attempt to create broker " + id + " on host " + host.name() + " with null capacity.");
     _host = host;
     _id = id;
     _brokerCapacity = new double[Resource.cachedValues().size()];
@@ -123,7 +121,7 @@ public class Broker implements Serializable, Comparable<Broker> {
    * Get broker capacity for the requested resource.
    *
    * @param resource Resource for which the capacity will be provided.
-   * @return If broker is alive, the capacity of the requested resource, DEAD_BROKER_CAPACITY otherwise.
+   * @return If broker is alive, the capacity of the requested resource, {@link #DEAD_BROKER_CAPACITY} otherwise.
    */
   public double capacityFor(Resource resource) {
       return _brokerCapacity[resource.id()];
@@ -187,7 +185,7 @@ public class Broker implements Serializable, Comparable<Broker> {
   /**
    * Get number of replicas from the given topic in this broker.
    *
-   * @param topic Topic for which the replica count will be returned.
+   * @param topic Topic for which both the leader and follower replica count will be returned.
    * @return The number of replicas from the given topic in this broker.
    */
   public int numReplicasOfTopicInBroker(String topic) {
@@ -196,21 +194,38 @@ public class Broker implements Serializable, Comparable<Broker> {
   }
 
   /**
-   * @return True if the broker is not dead, false otherwise.
+   * Get number of only leader replicas from the given topic in this broker.
+   *
+   * @param topicName Topic for which the replica count will be returned.
+   * @return The number of leader replicas from the given topic in this broker.
+   */
+  public int numLeadersFor(String topicName) {
+    return (int) replicasOfTopicInBroker(topicName).stream().filter(Replica::isLeader).count();
+  }
+
+  /**
+   * @return {@code true} if the broker is not dead, {@code false} otherwise.
    */
   public boolean isAlive() {
     return _state != State.DEAD;
   }
 
   /**
-   * @return True if the broker is a new broker, false otherwise.
+   * @return {@code true} if the broker is using JBOD, {@code false} otherwise
+   */
+  public boolean isUsingJBOD() {
+    return !_diskByLogdir.isEmpty();
+  }
+
+  /**
+   * @return {@code true} if the broker is a new broker, {@code false} otherwise.
    */
   public boolean isNew() {
     return _state == State.NEW;
   }
 
   /**
-   * @return True if the broker has been demoted, false otherwise.
+   * @return {@code true} if the broker has been demoted, {@code false} otherwise.
    */
   public boolean isDemoted() {
     return _state == State.DEMOTED;
@@ -221,7 +236,7 @@ public class Broker implements Serializable, Comparable<Broker> {
    * Note that contrary to {@link State#DEAD}, a {@link State#BAD_DISKS} broker might receive replicas from other
    * brokers during a rebalance.
    *
-   * @return True if the broker has bad disks, false otherwise.
+   * @return {@code true} if the broker has bad disks, {@code false} otherwise.
    */
   public boolean hasBadDisks() {
     return _state == State.BAD_DISKS;
@@ -258,8 +273,8 @@ public class Broker implements Serializable, Comparable<Broker> {
   public SortedReplicas trackedSortedReplicas(String sortName) {
     SortedReplicas sortedReplicas = _sortedReplicas.get(sortName);
     if (sortedReplicas == null) {
-      throw new IllegalStateException("The sort name " + sortName + "  is not found. Make sure trackSortedReplicas() " +
-                                      "has been called for the sort name");
+      throw new IllegalStateException("The sort name " + sortName + "  is not found. Make sure trackSortedReplicas() "
+                                      + "has been called for the sort name");
     }
     return sortedReplicas;
   }
@@ -300,26 +315,6 @@ public class Broker implements Serializable, Comparable<Broker> {
   }
 
   /**
-   * get the load density of a resource on a replica for sorting. This is to help reduce the movement cost.
-   */
-  private double loadDensity(Replica replica, Resource resource) {
-    double expectedLoad = replica.load().expectedUtilizationFor(resource);
-    if (expectedLoad == 0.0) {
-      return 0.0;
-    } else if (resource == Resource.DISK) {
-      return expectedLoad;
-    } else {
-      double diskLoad = replica.load().expectedUtilizationFor(Resource.DISK);
-      if (diskLoad == 0.0) {
-        // Some big number
-        return 1000000.0;
-      } else {
-        return expectedLoad / diskLoad;
-      }
-    }
-  }
-
-  /**
    * Set broker alive status. If the broker is not alive, add all of its replicas to current offline replicas.
    *
    * @param newState The new state of the broker.
@@ -329,7 +324,7 @@ public class Broker implements Serializable, Comparable<Broker> {
     if (!isAlive()) {
       _currentOfflineReplicas.addAll(replicas());
       _diskByLogdir.values().forEach(d -> d.setState(Disk.State.DEAD));
-      Resource.cachedValues().forEach(r -> _brokerCapacity[r.id()] =  DEAD_BROKER_CAPACITY);
+      Resource.cachedValues().forEach(r -> _brokerCapacity[r.id()] = DEAD_BROKER_CAPACITY);
     }
   }
 
@@ -378,6 +373,7 @@ public class Broker implements Serializable, Comparable<Broker> {
    * later populating replicas to cluster model will get some offline replicas' disk not found.
    *
    * @param logdir Logdir of the dead disk to be added to the current broker.
+   * @return The dead disk that was added to this broker.
    */
   Disk addDeadDisk(String logdir) {
     Disk disk = new Disk(logdir, this, -1);
@@ -433,9 +429,14 @@ public class Broker implements Serializable, Comparable<Broker> {
     }
   }
 
-  private void updateSortedReplicas(Replica replica) {
+  private void removeSortedReplicas(Replica replica) {
     _sortedReplicas.values().forEach(sr -> {
       sr.remove(replica);
+    });
+  }
+
+  private void addSortedReplicas(Replica replica) {
+    _sortedReplicas.values().forEach(sr -> {
       sr.add(replica);
     });
   }
@@ -451,12 +452,14 @@ public class Broker implements Serializable, Comparable<Broker> {
   AggregatedMetricValues makeFollower(TopicPartition tp) {
     Replica replica = replica(tp);
     _leadershipLoadForNwResources.subtractLoad(replica.load());
+    // Remove once before load change for replica
+    removeSortedReplicas(replica);
 
     AggregatedMetricValues leadershipLoadDelta = replica.makeFollower();
     // Remove leadership load from load.
     _load.subtractLoad(leadershipLoadDelta);
     _leaderReplicas.remove(replica);
-    updateSortedReplicas(replica);
+    addSortedReplicas(replica);
     return leadershipLoadDelta;
   }
 
@@ -470,12 +473,14 @@ public class Broker implements Serializable, Comparable<Broker> {
    */
   void makeLeader(TopicPartition tp, AggregatedMetricValues leadershipLoadDelta) {
     Replica replica = replica(tp);
+    // Remove once before load change for replica
+    removeSortedReplicas(replica);
     replica.makeLeader(leadershipLoadDelta);
     _leadershipLoadForNwResources.addLoad(replica.load());
     // Add leadership load to load.
     _load.addLoad(leadershipLoadDelta);
     _leaderReplicas.add(replica);
-    updateSortedReplicas(replica);
+    addSortedReplicas(replica);
   }
 
   /**
@@ -605,11 +610,7 @@ public class Broker implements Serializable, Comparable<Broker> {
     for (Replica replica : _replicas) {
       replicaList.add(replica.getJsonStructure());
     }
-    Map<String, Object> brokerMap = new HashMap<>(3);
-    brokerMap.put(ModelUtils.BROKER_ID, _id);
-    brokerMap.put(ModelUtils.BROKER_STATE, _state);
-    brokerMap.put(ModelUtils.REPLICAS, replicaList);
-    return brokerMap;
+    return Map.of(ModelUtils.BROKER_ID, _id, ModelUtils.BROKER_STATE, _state, ModelUtils.REPLICAS, replicaList);
   }
 
   /**
@@ -622,7 +623,7 @@ public class Broker implements Serializable, Comparable<Broker> {
     if (_diskByLogdir.isEmpty()) {
       return Collections.emptyMap();
     }
-    Map<String, DiskStats> diskStatMap = new HashMap<>(_diskByLogdir.size());
+    Map<String, DiskStats> diskStatMap = new HashMap<>();
     _diskByLogdir.forEach((k, v) -> diskStatMap.put(k, v.diskStats()));
     return diskStatMap;
   }

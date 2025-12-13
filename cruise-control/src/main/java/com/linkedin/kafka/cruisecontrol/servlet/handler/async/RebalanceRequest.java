@@ -10,20 +10,26 @@ import com.linkedin.kafka.cruisecontrol.servlet.parameters.RebalanceParameters;
 import java.util.Map;
 
 import static com.linkedin.kafka.cruisecontrol.servlet.parameters.ParameterUtils.REBALANCE_PARAMETER_OBJECT_CONFIG;
-
+import static com.linkedin.cruisecontrol.common.utils.Utils.validateNotNull;
 
 public class RebalanceRequest extends AbstractAsyncRequest {
   protected RebalanceParameters _parameters;
+  protected RebalanceRunnable _runnable;
 
   public RebalanceRequest() {
     super();
+  }
+
+  public RebalanceRunnable getRunnable() {
+    return _runnable;
   }
 
   @Override
   protected OperationFuture handle(String uuid) {
     OperationFuture future = new OperationFuture("Rebalance");
     pending(future.operationProgress());
-    _asyncKafkaCruiseControl.sessionExecutor().submit(new RebalanceRunnable(_asyncKafkaCruiseControl, future, _parameters, uuid));
+    _runnable = new RebalanceRunnable(_asyncKafkaCruiseControl, future, _parameters, uuid);
+    _asyncKafkaCruiseControl.sessionExecutor().execute(_runnable);
     return future;
   }
 
@@ -40,9 +46,7 @@ public class RebalanceRequest extends AbstractAsyncRequest {
   @Override
   public void configure(Map<String, ?> configs) {
     super.configure(configs);
-    _parameters = (RebalanceParameters) configs.get(REBALANCE_PARAMETER_OBJECT_CONFIG);
-    if (_parameters == null) {
-      throw new IllegalArgumentException("Parameter configuration is missing from the request.");
-    }
+    _parameters = (RebalanceParameters) validateNotNull(configs.get(REBALANCE_PARAMETER_OBJECT_CONFIG),
+            "Parameter configuration is missing from the request.");
   }
 }

@@ -11,7 +11,6 @@ import com.linkedin.kafka.cruisecontrol.config.constants.AnomalyDetectorConfig;
 import com.linkedin.kafka.cruisecontrol.monitor.metricdefinition.KafkaMetricDef;
 import com.linkedin.kafka.cruisecontrol.monitor.sampling.holder.BrokerEntity;
 import java.util.Collections;
-import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.StringJoiner;
@@ -21,22 +20,14 @@ import static com.linkedin.kafka.cruisecontrol.detector.AnomalyDetectorUtils.ANO
 import static com.linkedin.kafka.cruisecontrol.detector.MetricAnomalyDetector.METRIC_ANOMALY_DESCRIPTION_OBJECT_CONFIG;
 import static com.linkedin.kafka.cruisecontrol.detector.MetricAnomalyDetector.METRIC_ANOMALY_BROKER_ENTITIES_OBJECT_CONFIG;
 import static com.linkedin.kafka.cruisecontrol.detector.MetricAnomalyDetector.METRIC_ANOMALY_FIXABLE_OBJECT_CONFIG;
-import static com.linkedin.kafka.cruisecontrol.metricsreporter.metric.RawMetricType.BROKER_CONSUMER_FETCH_LOCAL_TIME_MS_MAX;
-import static com.linkedin.kafka.cruisecontrol.metricsreporter.metric.RawMetricType.BROKER_CONSUMER_FETCH_LOCAL_TIME_MS_MEAN;
-import static com.linkedin.kafka.cruisecontrol.metricsreporter.metric.RawMetricType.BROKER_FOLLOWER_FETCH_LOCAL_TIME_MS_MAX;
-import static com.linkedin.kafka.cruisecontrol.metricsreporter.metric.RawMetricType.BROKER_FOLLOWER_FETCH_LOCAL_TIME_MS_MEAN;
-import static com.linkedin.kafka.cruisecontrol.metricsreporter.metric.RawMetricType.BROKER_LOG_FLUSH_TIME_MS_MAX;
-import static com.linkedin.kafka.cruisecontrol.metricsreporter.metric.RawMetricType.BROKER_LOG_FLUSH_TIME_MS_MEAN;
-import static com.linkedin.kafka.cruisecontrol.metricsreporter.metric.RawMetricType.BROKER_PRODUCE_LOCAL_TIME_MS_MAX;
-import static com.linkedin.kafka.cruisecontrol.metricsreporter.metric.RawMetricType.BROKER_PRODUCE_LOCAL_TIME_MS_MEAN;
-/*import static com.linkedin.kafka.cruisecontrol.metricsreporter.metric.RawMetricType.BROKER_CONSUMER_FETCH_LOCAL_TIME_MS_50TH;
+import static com.linkedin.kafka.cruisecontrol.metricsreporter.metric.RawMetricType.BROKER_CONSUMER_FETCH_LOCAL_TIME_MS_50TH;
 import static com.linkedin.kafka.cruisecontrol.metricsreporter.metric.RawMetricType.BROKER_CONSUMER_FETCH_LOCAL_TIME_MS_999TH;
 import static com.linkedin.kafka.cruisecontrol.metricsreporter.metric.RawMetricType.BROKER_FOLLOWER_FETCH_LOCAL_TIME_MS_50TH;
 import static com.linkedin.kafka.cruisecontrol.metricsreporter.metric.RawMetricType.BROKER_FOLLOWER_FETCH_LOCAL_TIME_MS_999TH;
 import static com.linkedin.kafka.cruisecontrol.metricsreporter.metric.RawMetricType.BROKER_LOG_FLUSH_TIME_MS_50TH;
 import static com.linkedin.kafka.cruisecontrol.metricsreporter.metric.RawMetricType.BROKER_LOG_FLUSH_TIME_MS_999TH;
 import static com.linkedin.kafka.cruisecontrol.metricsreporter.metric.RawMetricType.BROKER_PRODUCE_LOCAL_TIME_MS_50TH;
-import static com.linkedin.kafka.cruisecontrol.metricsreporter.metric.RawMetricType.BROKER_PRODUCE_LOCAL_TIME_MS_999TH;*/
+import static com.linkedin.kafka.cruisecontrol.metricsreporter.metric.RawMetricType.BROKER_PRODUCE_LOCAL_TIME_MS_999TH;
 
 
 /**
@@ -44,22 +35,14 @@ import static com.linkedin.kafka.cruisecontrol.metricsreporter.metric.RawMetricT
  */
 public class KafkaMetricAnomalyFinder extends PercentileMetricAnomalyFinder<BrokerEntity> {
   private static final String DEFAULT_METRICS =
-/*      new StringJoiner(",").add(BROKER_PRODUCE_LOCAL_TIME_MS_50TH.toString())
+      new StringJoiner(",").add(BROKER_PRODUCE_LOCAL_TIME_MS_50TH.toString())
                            .add(BROKER_PRODUCE_LOCAL_TIME_MS_999TH.toString())
                            .add(BROKER_CONSUMER_FETCH_LOCAL_TIME_MS_50TH.toString())
                            .add(BROKER_CONSUMER_FETCH_LOCAL_TIME_MS_999TH.toString())
                            .add(BROKER_FOLLOWER_FETCH_LOCAL_TIME_MS_50TH.toString())
                            .add(BROKER_FOLLOWER_FETCH_LOCAL_TIME_MS_999TH.toString())
                            .add(BROKER_LOG_FLUSH_TIME_MS_50TH.toString())
-                           .add(BROKER_LOG_FLUSH_TIME_MS_999TH.toString()).toString();*/
-      new StringJoiner(",").add(BROKER_PRODUCE_LOCAL_TIME_MS_MAX.toString())
-                           .add(BROKER_PRODUCE_LOCAL_TIME_MS_MEAN.toString())
-                           .add(BROKER_CONSUMER_FETCH_LOCAL_TIME_MS_MAX.toString())
-                           .add(BROKER_CONSUMER_FETCH_LOCAL_TIME_MS_MEAN.toString())
-                           .add(BROKER_FOLLOWER_FETCH_LOCAL_TIME_MS_MAX.toString())
-                           .add(BROKER_FOLLOWER_FETCH_LOCAL_TIME_MS_MEAN.toString())
-                           .add(BROKER_LOG_FLUSH_TIME_MS_MAX.toString())
-                           .add(BROKER_LOG_FLUSH_TIME_MS_MEAN.toString()).toString();
+                           .add(BROKER_LOG_FLUSH_TIME_MS_999TH.toString()).toString();
   private KafkaCruiseControl _kafkaCruiseControl;
 
   @Override
@@ -69,11 +52,10 @@ public class KafkaMetricAnomalyFinder extends PercentileMetricAnomalyFinder<Brok
 
   @Override
   public KafkaMetricAnomaly createMetricAnomaly(String description, BrokerEntity entity, Short metricId, List<Long> windows) {
-    Map<String, Object> parameterConfigOverrides = new HashMap<>(4);
-    parameterConfigOverrides.put(METRIC_ANOMALY_DESCRIPTION_OBJECT_CONFIG, description);
-    parameterConfigOverrides.put(METRIC_ANOMALY_BROKER_ENTITIES_OBJECT_CONFIG, Collections.singletonMap(entity, _kafkaCruiseControl.timeMs()));
-    parameterConfigOverrides.put(ANOMALY_DETECTION_TIME_MS_OBJECT_CONFIG, _kafkaCruiseControl.timeMs());
-    parameterConfigOverrides.put(METRIC_ANOMALY_FIXABLE_OBJECT_CONFIG, false);
+    Map<String, Object> parameterConfigOverrides =
+        Map.of(METRIC_ANOMALY_DESCRIPTION_OBJECT_CONFIG, description,
+               METRIC_ANOMALY_BROKER_ENTITIES_OBJECT_CONFIG, Collections.singletonMap(entity, _kafkaCruiseControl.timeMs()),
+               ANOMALY_DETECTION_TIME_MS_OBJECT_CONFIG, _kafkaCruiseControl.timeMs(), METRIC_ANOMALY_FIXABLE_OBJECT_CONFIG, false);
     return _kafkaCruiseControl.config().getConfiguredInstance(AnomalyDetectorConfig.METRIC_ANOMALY_CLASS_CONFIG,
                                                               KafkaMetricAnomaly.class,
                                                               parameterConfigOverrides);

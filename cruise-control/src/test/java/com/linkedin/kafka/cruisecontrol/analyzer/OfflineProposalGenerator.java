@@ -21,11 +21,12 @@ import java.io.ObjectInputStream;
 import java.util.Arrays;
 import java.util.Properties;
 import java.util.stream.Collectors;
-import org.apache.kafka.common.utils.SystemTime;
+import org.apache.kafka.clients.admin.AdminClient;
+import org.apache.kafka.common.utils.Time;
 import org.easymock.EasyMock;
 
 
-public class OfflineProposalGenerator {
+public final class OfflineProposalGenerator {
 
   private OfflineProposalGenerator() {
 
@@ -55,9 +56,10 @@ public class OfflineProposalGenerator {
     // Instantiate the components.
     GoalOptimizer goalOptimizer = new GoalOptimizer(config,
                                                     null,
-                                                    new SystemTime(),
+                                                    Time.SYSTEM,
                                                     new MetricRegistry(),
-                                                    EasyMock.mock(Executor.class));
+                                                    EasyMock.mock(Executor.class),
+                                                    EasyMock.mock(AdminClient.class));
     start = System.currentTimeMillis();
     OptimizerResult optimizerResult = goalOptimizer.optimizations(clusterModel, new OperationProgress());
     end = System.currentTimeMillis();
@@ -71,7 +73,7 @@ public class OfflineProposalGenerator {
     ClusterModelStats optimizedStats = clusterModel.getClusterStats(balancingConstraint);
 
     double[] testStatistics = AnalyzerUtils.testDifference(origStats.utilizationMatrix(), optimizedStats.utilizationMatrix());
-    System.out.println(Arrays.stream(RawAndDerivedResource.values()).map(x -> x.toString()).collect(Collectors.joining(", ")));
+    System.out.println(Arrays.stream(RawAndDerivedResource.values()).map(Enum::toString).collect(Collectors.joining(", ")));
     System.out.println(Arrays.stream(testStatistics).boxed().map(pValue -> Double.toString(pValue)).collect(Collectors.joining(", ")));
 
   }

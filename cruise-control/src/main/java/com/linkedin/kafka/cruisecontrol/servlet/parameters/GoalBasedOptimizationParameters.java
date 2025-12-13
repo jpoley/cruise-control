@@ -7,7 +7,6 @@ package com.linkedin.kafka.cruisecontrol.servlet.parameters;
 import com.linkedin.kafka.cruisecontrol.monitor.ModelCompletenessRequirements;
 import java.io.UnsupportedEncodingException;
 import java.util.Collections;
-import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.SortedSet;
@@ -19,6 +18,7 @@ import static com.linkedin.kafka.cruisecontrol.servlet.parameters.ParameterUtils
 import static com.linkedin.kafka.cruisecontrol.servlet.parameters.ParameterUtils.EXCLUDED_TOPICS_PARAM;
 import static com.linkedin.kafka.cruisecontrol.servlet.parameters.ParameterUtils.EXCLUDE_RECENTLY_REMOVED_BROKERS_PARAM;
 import static com.linkedin.kafka.cruisecontrol.servlet.parameters.ParameterUtils.GOALS_PARAM;
+import static com.linkedin.kafka.cruisecontrol.servlet.parameters.ParameterUtils.FAST_MODE_PARAM;
 
 
 public abstract class GoalBasedOptimizationParameters extends KafkaOptimizationParameters {
@@ -30,25 +30,21 @@ public abstract class GoalBasedOptimizationParameters extends KafkaOptimizationP
     validParameterNames.add(EXCLUDED_TOPICS_PARAM);
     validParameterNames.add(EXCLUDE_RECENTLY_REMOVED_BROKERS_PARAM);
     validParameterNames.add(GOALS_PARAM);
+    validParameterNames.add(FAST_MODE_PARAM);
     validParameterNames.addAll(KafkaOptimizationParameters.CASE_INSENSITIVE_PARAMETER_NAMES);
     CASE_INSENSITIVE_PARAMETER_NAMES = Collections.unmodifiableSortedSet(validParameterNames);
   }
   private static final boolean INCLUDE_ALL_TOPICS = true;
-  private static final Map<ParameterUtils.DataFrom, Integer> MIN_NUM_VALID_WINDOWS = new HashMap<>(2);
-  private static final Map<ParameterUtils.DataFrom, Double> MIN_VALID_PARTITIONS_RATIO = new HashMap<>(2);
-  static {
-    MIN_NUM_VALID_WINDOWS.put(ParameterUtils.DataFrom.VALID_PARTITIONS, Integer.MAX_VALUE);
-    MIN_NUM_VALID_WINDOWS.put(ParameterUtils.DataFrom.VALID_WINDOWS, 1);
-  }
-  static {
-    MIN_VALID_PARTITIONS_RATIO.put(ParameterUtils.DataFrom.VALID_PARTITIONS, 0.0);
-    MIN_VALID_PARTITIONS_RATIO.put(ParameterUtils.DataFrom.VALID_WINDOWS, 1.0);
-  }
+  private static final Map<ParameterUtils.DataFrom, Integer> MIN_NUM_VALID_WINDOWS =
+      Map.of(ParameterUtils.DataFrom.VALID_PARTITIONS, Integer.MAX_VALUE, ParameterUtils.DataFrom.VALID_WINDOWS, 1);
+  private static final Map<ParameterUtils.DataFrom, Double> MIN_VALID_PARTITIONS_RATIO =
+      Map.of(ParameterUtils.DataFrom.VALID_PARTITIONS, 0.0, ParameterUtils.DataFrom.VALID_WINDOWS, 1.0);
   protected ParameterUtils.DataFrom _dataFrom;
   protected boolean _useReadyDefaultGoals;
   protected Pattern _excludedTopics;
   protected boolean _excludeRecentlyRemovedBrokers;
   protected GoalsAndRequirements _goalsAndRequirements;
+  protected boolean _fastMode;
 
   GoalBasedOptimizationParameters() {
     super();
@@ -57,12 +53,13 @@ public abstract class GoalBasedOptimizationParameters extends KafkaOptimizationP
   @Override
   protected void initParameters() throws UnsupportedEncodingException {
     super.initParameters();
-    _dataFrom = ParameterUtils.getDataFrom(_request);
-    _useReadyDefaultGoals = ParameterUtils.useReadyDefaultGoals(_request);
-    _excludedTopics = ParameterUtils.excludedTopics(_request);
-    _excludeRecentlyRemovedBrokers = ParameterUtils.excludeRecentlyRemovedBrokers(_request);
-    List<String> goals = ParameterUtils.getGoals(_request);
+    _dataFrom = ParameterUtils.getDataFrom(_requestContext);
+    _useReadyDefaultGoals = ParameterUtils.useReadyDefaultGoals(_requestContext);
+    _excludedTopics = ParameterUtils.excludedTopics(_requestContext);
+    _excludeRecentlyRemovedBrokers = ParameterUtils.excludeRecentlyRemovedBrokers(_requestContext);
+    List<String> goals = ParameterUtils.getGoals(_requestContext);
     _goalsAndRequirements = new GoalsAndRequirements(goals, getRequirements(_dataFrom));
+    _fastMode = ParameterUtils.fastMode(_requestContext);
   }
 
   public ParameterUtils.DataFrom dataFrom() {
@@ -87,6 +84,10 @@ public abstract class GoalBasedOptimizationParameters extends KafkaOptimizationP
 
   public boolean excludeRecentlyRemovedBrokers() {
     return _excludeRecentlyRemovedBrokers;
+  }
+
+  public boolean fastMode() {
+    return _fastMode;
   }
 
   protected static ModelCompletenessRequirements getRequirements(ParameterUtils.DataFrom dataFrom) {

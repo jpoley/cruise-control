@@ -10,8 +10,8 @@ import com.linkedin.kafka.cruisecontrol.common.ClusterProperty;
 import com.linkedin.kafka.cruisecontrol.common.Resource;
 import com.linkedin.kafka.cruisecontrol.common.TestConstants;
 import com.linkedin.kafka.cruisecontrol.config.BrokerCapacityConfigFileResolver;
+import com.linkedin.kafka.cruisecontrol.exception.BrokerCapacityResolutionException;
 import com.linkedin.kafka.cruisecontrol.monitor.ModelGeneration;
-
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashMap;
@@ -20,7 +20,6 @@ import java.util.List;
 import java.util.Map;
 import java.util.Random;
 import java.util.Set;
-
 import java.util.SortedMap;
 import java.util.SortedSet;
 import java.util.TreeMap;
@@ -29,11 +28,16 @@ import org.apache.kafka.common.TopicPartition;
 
 import static com.linkedin.kafka.cruisecontrol.common.TestConstants.JBOD_BROKER_CAPACITY_CONFIG_FILE;
 import static com.linkedin.kafka.cruisecontrol.common.TestConstants.DEFAULT_BROKER_CAPACITY_CONFIG_FILE;
+import static com.linkedin.kafka.cruisecontrol.monitor.MonitorUtils.BROKER_CAPACITY_FETCH_TIMEOUT_MS;
 
 /**
  * A class to generate and populate random clusters with given properties.
  */
-public class RandomCluster {
+public final class RandomCluster {
+
+  // The randomly generated cluster always has this topic and the partition count of this topic
+  // equals the broker count in the cluster.
+  public static final String TOPIC_WITH_ONE_LEADER_REPLICA_PER_BROKER = "TopicWithOneLeaderPerBroker";
 
   private RandomCluster() {
 
@@ -44,18 +48,22 @@ public class RandomCluster {
    *
    * @param clusterProperties Cluster properties specifying number of racks and brokers.
    * @return Cluster with the specified number of racks and brokers.
+   * @throws BrokerCapacityResolutionException If broker capacity resolver fails to resolve broker capacity.
    */
-  public static ClusterModel generate(Map<ClusterProperty, Number> clusterProperties) {
+  public static ClusterModel generate(Map<ClusterProperty, Number> clusterProperties)
+      throws BrokerCapacityResolutionException {
     int numRacks = clusterProperties.get(ClusterProperty.NUM_RACKS).intValue();
     int numBrokers = clusterProperties.get(ClusterProperty.NUM_BROKERS).intValue();
     BrokerCapacityConfigFileResolver configFileResolver = new BrokerCapacityConfigFileResolver();
     boolean populateReplicaPlacementInfo = clusterProperties.get(ClusterProperty.POPULATE_REPLICA_PLACEMENT_INFO).intValue() > 0;
     if (populateReplicaPlacementInfo) {
       configFileResolver.configure(Collections.singletonMap(BrokerCapacityConfigFileResolver.CAPACITY_CONFIG_FILE,
-                                                            RandomCluster.class.getClassLoader().getResource(JBOD_BROKER_CAPACITY_CONFIG_FILE).getFile()));
+                                                            RandomCluster.class.getClassLoader()
+                                                                               .getResource(JBOD_BROKER_CAPACITY_CONFIG_FILE).getFile()));
     } else {
       configFileResolver.configure(Collections.singletonMap(BrokerCapacityConfigFileResolver.CAPACITY_CONFIG_FILE,
-                                                            RandomCluster.class.getClassLoader().getResource(DEFAULT_BROKER_CAPACITY_CONFIG_FILE).getFile()));
+                                                            RandomCluster.class.getClassLoader()
+                                                                               .getResource(DEFAULT_BROKER_CAPACITY_CONFIG_FILE).getFile()));
     }
 
     if (numRacks > numBrokers || numBrokers <= 0 || numRacks <= 0) {
@@ -69,13 +77,15 @@ public class RandomCluster {
     }
     // Create brokers and assign a broker to each rack.
     for (int i = 0; i < numRacks; i++) {
-      cluster.createBroker(Integer.toString(i), Integer.toString(i), i, configFileResolver.capacityForBroker("", "", i),
+      cluster.createBroker(Integer.toString(i), Integer.toString(i), i,
+                           configFileResolver.capacityForBroker("", "", i, BROKER_CAPACITY_FETCH_TIMEOUT_MS, true),
                            populateReplicaPlacementInfo);
     }
     // Assign the rest of the brokers over racks randomly.
     for (int i = numRacks; i < numBrokers; i++) {
       int randomRackId = uniformlyRandom(0, numRacks - 1, TestConstants.SEED_BASE + i);
-      cluster.createBroker(Integer.toString(randomRackId), Integer.toString(i), i, configFileResolver.capacityForBroker("", "", i),
+      cluster.createBroker(Integer.toString(randomRackId), Integer.toString(i), i,
+                           configFileResolver.capacityForBroker("", "", i, BROKER_CAPACITY_FETCH_TIMEOUT_MS, true),
                            populateReplicaPlacementInfo);
     }
     return cluster;
@@ -117,21 +127,20 @@ public class RandomCluster {
     int numDeadBrokers = properties.get(ClusterProperty.NUM_DEAD_BROKERS).intValue();
     int numBrokersWithBadDisk = properties.get(ClusterProperty.NUM_BROKERS_WITH_BAD_DISK).intValue();
     boolean populateReplicaPlacementInfo = properties.get(ClusterProperty.POPULATE_REPLICA_PLACEMENT_INFO).intValue() > 0;
-    if (numDeadBrokers < 0 ||
-        numBrokersWithBadDisk < 0 ||
-        numBrokers < numDeadBrokers + numBrokersWithBadDisk ||
-        properties.get(ClusterProperty.MEAN_NW_IN).doubleValue() < 0 ||
-        properties.get(ClusterProperty.MEAN_NW_OUT).doubleValue() < 0 ||
-        properties.get(ClusterProperty.MEAN_DISK).doubleValue() < 0 ||
-        properties.get(ClusterProperty.MEAN_CPU).doubleValue() < 0 ||
-        properties.get(ClusterProperty.NUM_TOPICS).intValue() <= 0 ||
-        properties.get(ClusterProperty.MIN_REPLICATION).intValue() > properties.get(ClusterProperty.MAX_REPLICATION)
-                                                                               .intValue() ||
-        (leaderInFirstPosition && properties.get(ClusterProperty.MIN_REPLICATION).intValue() < 2) ||
-        properties.get(ClusterProperty.MAX_REPLICATION).intValue() > numBrokers ||
-        properties.get(ClusterProperty.NUM_TOPICS).intValue() > properties.get(ClusterProperty.NUM_REPLICAS).intValue() ||
-        (properties.get(ClusterProperty.MIN_REPLICATION).intValue() == properties.get(ClusterProperty.MAX_REPLICATION).intValue() &&
-         properties.get(ClusterProperty.NUM_REPLICAS).intValue() % properties.get(ClusterProperty.MIN_REPLICATION).intValue() != 0)) {
+    if (numDeadBrokers < 0
+        || numBrokersWithBadDisk < 0
+        || numBrokers < numDeadBrokers + numBrokersWithBadDisk
+        || properties.get(ClusterProperty.MEAN_NW_IN).doubleValue() < 0
+        || properties.get(ClusterProperty.MEAN_NW_OUT).doubleValue() < 0
+        || properties.get(ClusterProperty.MEAN_DISK).doubleValue() < 0
+        || properties.get(ClusterProperty.MEAN_CPU).doubleValue() < 0
+        || properties.get(ClusterProperty.NUM_TOPICS).intValue() <= 0
+        || properties.get(ClusterProperty.MIN_REPLICATION).intValue() > properties.get(ClusterProperty.MAX_REPLICATION).intValue()
+        || (leaderInFirstPosition && properties.get(ClusterProperty.MIN_REPLICATION).intValue() < 2)
+        || properties.get(ClusterProperty.MAX_REPLICATION).intValue() > numBrokers
+        || properties.get(ClusterProperty.NUM_TOPICS).intValue() > properties.get(ClusterProperty.NUM_REPLICAS).intValue()
+        || (properties.get(ClusterProperty.MIN_REPLICATION).intValue() == properties.get(ClusterProperty.MAX_REPLICATION).intValue()
+            && properties.get(ClusterProperty.NUM_REPLICAS).intValue() % properties.get(ClusterProperty.MIN_REPLICATION).intValue() != 0)) {
       throw new IllegalArgumentException("Random cluster population failed due to bad input.");
     }
 
@@ -191,6 +200,7 @@ public class RandomCluster {
       randomByResource.put(resource, new Random(seed));
     }
     Random randomForTopicPopularity = new Random(TestConstants.TOPIC_POPULARITY_SEED);
+    metadata.add(new TopicMetadata(TOPIC_WITH_ONE_LEADER_REPLICA_PER_BROKER, 2, numBrokers));
     for (TopicMetadata datum : metadata) {
       double topicPopularity = exponentialRandom(1.0, randomForTopicPopularity);
       String topic = datum.topic();
@@ -236,7 +246,8 @@ public class RandomCluster {
                 }
               }
             }
-          } else { // Exponential.
+          } else {
+            // Exponential.
             int binRange = numBrokers * numBrokers;
             int randomBinValue = uniformlyRandom(1, binRange, TestConstants.REPLICA_ASSIGNMENT_SEED + replicaIndex);
             randomBrokerId = 0;
@@ -384,7 +395,7 @@ public class RandomCluster {
       if (populateDisk) {
         int remainingBrokerWithBadDiskIndex = 0;
         for (Broker brokerToMark : cluster.brokers()) {
-          if (numBrokersWithBadDisk  == remainingBrokerWithBadDiskIndex) {
+          if (numBrokersWithBadDisk == remainingBrokerWithBadDiskIndex) {
             break;
           }
           if (brokerToMark.isAlive()) {
@@ -486,7 +497,7 @@ public class RandomCluster {
   /**
    * @return Get a cluster model having a single broker with bad disk.
    */
-  public static ClusterModel singleBrokerWithBadDisk() {
+  public static ClusterModel singleBrokerWithBadDisk() throws BrokerCapacityResolutionException {
     Map<ClusterProperty, Number> singleBrokerWithBadDisk = new HashMap<>();
     singleBrokerWithBadDisk.put(ClusterProperty.NUM_BROKERS, 3);
     singleBrokerWithBadDisk.put(ClusterProperty.NUM_RACKS, 3);
@@ -514,9 +525,12 @@ public class RandomCluster {
     private int _numTopicLeaders;
 
     TopicMetadata(int topicId) {
-      _topic = "T" + Integer.toString(topicId);
-      _replicationFactor = 1;
-      _numTopicLeaders = 1;
+      this("T" + topicId, 1, 1);
+    }
+    TopicMetadata(String topicName, int replicationFactor, int numTopicLeaders) {
+      _topic = topicName;
+      _replicationFactor = replicationFactor;
+      _numTopicLeaders = numTopicLeaders;
     }
 
     void incrementNumTopicLeaders() {

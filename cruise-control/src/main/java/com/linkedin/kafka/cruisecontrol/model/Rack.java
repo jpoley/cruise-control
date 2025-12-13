@@ -5,8 +5,8 @@
 package com.linkedin.kafka.cruisecontrol.model;
 
 import com.linkedin.cruisecontrol.monitor.sampling.aggregator.AggregatedMetricValues;
+import com.linkedin.kafka.cruisecontrol.analyzer.OptimizationOptions;
 import com.linkedin.kafka.cruisecontrol.common.Resource;
-
 import com.linkedin.kafka.cruisecontrol.config.BrokerCapacityInfo;
 import java.io.IOException;
 import java.io.OutputStream;
@@ -19,7 +19,6 @@ import java.util.List;
 import java.util.ArrayList;
 import java.util.Map;
 import java.util.Set;
-
 import org.apache.kafka.common.TopicPartition;
 
 import static com.linkedin.kafka.cruisecontrol.common.Resource.DISK;
@@ -33,7 +32,7 @@ public class Rack implements Serializable {
   private final String _id;
   private final Map<String, Host> _hosts;
   private final Map<Integer, Broker> _brokers;
-  private Load _load;
+  private final Load _load;
   private final double[] _rackCapacity;
 
   /**
@@ -101,21 +100,6 @@ public class Rack implements Serializable {
   }
 
   /**
-   * Get the number of replicas with the given topic name in this rack.
-   *
-   * @param topic Name of the topic for which the number of replicas in this rack will be counted.
-   * @return Number of replicas with the given topic name in this rack.
-   */
-  public int numTopicReplicas(String topic) {
-    int numTopicReplicas = 0;
-
-    for (Host host : _hosts.values()) {
-      numTopicReplicas += host.numTopicReplicas(topic);
-    }
-    return numTopicReplicas;
-  }
-
-  /**
    * @return A set of topic names in the cluster.
    */
   public Set<String> topics() {
@@ -141,11 +125,27 @@ public class Rack implements Serializable {
   /**
    * Checks if rack has at least one alive servers. If none of the servers is alive, rack is considered dead.
    *
-   * @return True if rack is alive, false otherwise.
+   * @return {@code true} if rack is alive, {@code false} otherwise.
    */
   public boolean isRackAlive() {
     for (Host host : _hosts.values()) {
       if (host.isAlive()) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  /**
+   * Check whether the rack is alive and allowed replica moves.
+   *
+   * @param optimizationOptions Options to use in checking if this rack has hosts that are alive and allowed replica moves.
+   * @return Whether the rack is alive and allowed replica moves. The rack is alive and allowed replica moves as long as
+   * it has at least one host alive which is not excluded for replica moves.
+   */
+  public boolean isAliveAndAllowedReplicaMoves(OptimizationOptions optimizationOptions) {
+    for (Host host : _hosts.values()) {
+      if (host.isAliveAndAllowedReplicaMoves(optimizationOptions)) {
         return true;
       }
     }
@@ -232,9 +232,10 @@ public class Rack implements Serializable {
   /**
    * Set the replica load.
    *
-   * @param brokerId       Broker Id containing the replica with the given topic partition.
+   * @param brokerId Broker Id containing the replica with the given topic partition.
    * @param tp Topic partition that identifies the replica in this broker.
-   * @param aggregatedMetricValues   The metric values for this replica..
+   * @param aggregatedMetricValues The metric values for this replica.
+   * @param windows The windows list of the aggregated metric values.
    */
   void setReplicaLoad(int brokerId, TopicPartition tp, AggregatedMetricValues aggregatedMetricValues, List<Long> windows) {
     Host host = _brokers.get(brokerId).host();
@@ -269,6 +270,8 @@ public class Rack implements Serializable {
 
   /**
    * Set the broker state and update the capacity
+   * @param brokerId Broker id.
+   * @param newState The new state of the broker.
    */
   void setBrokerState(int brokerId, Broker.State newState) {
     // Broker is dead

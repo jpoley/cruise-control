@@ -15,20 +15,20 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 import com.linkedin.kafka.cruisecontrol.config.KafkaCruiseControlConfig;
 import org.apache.kafka.clients.admin.AdminClient;
+import org.apache.kafka.clients.admin.LogDirDescription;
+import org.apache.kafka.clients.admin.ReplicaInfo;
 import org.apache.kafka.common.KafkaFuture;
 import org.apache.kafka.common.TopicPartitionReplica;
 import org.apache.kafka.common.errors.KafkaStorageException;
 import org.apache.kafka.common.errors.LogDirNotFoundException;
 import org.apache.kafka.common.errors.ReplicaNotAvailableException;
-import org.apache.kafka.common.protocol.Errors;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import static com.linkedin.kafka.cruisecontrol.config.constants.ExecutorConfig.LOGDIR_RESPONSE_TIMEOUT_MS_CONFIG;
 import static org.apache.kafka.clients.admin.DescribeReplicaLogDirsResult.ReplicaLogDirInfo;
-import static org.apache.kafka.common.requests.DescribeLogDirsResponse.LogDirInfo;
 
-public class ExecutorAdminUtils {
+public final class ExecutorAdminUtils {
   private static final Logger LOG = LoggerFactory.getLogger(ExecutorAdminUtils.class);
 
   private ExecutorAdminUtils() {
@@ -46,9 +46,9 @@ public class ExecutorAdminUtils {
   static Map<ExecutionTask, ReplicaLogDirInfo> getLogdirInfoForExecutionTask(Collection<ExecutionTask> tasks,
                                                                              AdminClient adminClient,
                                                                              KafkaCruiseControlConfig config) {
-    Set<TopicPartitionReplica> replicasToCheck = new HashSet<>(tasks.size());
-    Map<ExecutionTask, ReplicaLogDirInfo> logdirInfoByTask = new HashMap<>(tasks.size());
-    Map<TopicPartitionReplica, ExecutionTask> taskByReplica = new HashMap<>(tasks.size());
+    Set<TopicPartitionReplica> replicasToCheck = new HashSet<>();
+    Map<ExecutionTask, ReplicaLogDirInfo> logdirInfoByTask = new HashMap<>();
+    Map<TopicPartitionReplica, ExecutionTask> taskByReplica = new HashMap<>();
     tasks.forEach(t -> {
       TopicPartitionReplica tpr = new TopicPartitionReplica(t.proposal().topic(), t.proposal().partitionId(), t.brokerId());
       replicasToCheck.add(tpr);
@@ -78,8 +78,8 @@ public class ExecutorAdminUtils {
                                                  AdminClient adminClient,
                                                  ExecutionTaskManager executionTaskManager,
                                                  KafkaCruiseControlConfig config) {
-    Map<TopicPartitionReplica, String> replicaAssignment = new HashMap<>(tasksToExecute.size());
-    Map<TopicPartitionReplica, ExecutionTask> replicaToTask = new HashMap<>(tasksToExecute.size());
+    Map<TopicPartitionReplica, String> replicaAssignment = new HashMap<>();
+    Map<TopicPartitionReplica, ExecutionTask> replicaToTask = new HashMap<>();
     tasksToExecute.forEach(t -> {
       TopicPartitionReplica tpr = new TopicPartitionReplica(t.proposal().topic(), t.proposal().partitionId(), t.brokerId());
       replicaAssignment.put(tpr, t.proposal().replicasToMoveBetweenDisksByBroker().get(t.brokerId()).logdir());
@@ -88,8 +88,8 @@ public class ExecutorAdminUtils {
     for (Map.Entry<TopicPartitionReplica, KafkaFuture<Void>> entry: adminClient.alterReplicaLogDirs(replicaAssignment).values().entrySet()) {
       try {
         entry.getValue().get(config.getLong(LOGDIR_RESPONSE_TIMEOUT_MS_CONFIG), TimeUnit.MILLISECONDS);
-      } catch (InterruptedException | ExecutionException | TimeoutException |
-               LogDirNotFoundException | KafkaStorageException | ReplicaNotAvailableException e) {
+      } catch (InterruptedException | ExecutionException | TimeoutException | LogDirNotFoundException | KafkaStorageException
+          | ReplicaNotAvailableException e) {
         LOG.warn("Encounter exception {} when trying to execute task {}, mark task dead.", e.getMessage(), replicaToTask.get(entry.getKey()));
         executionTaskManager.markTaskAborting(replicaToTask.get(entry.getKey()));
         executionTaskManager.markTaskDead(replicaToTask.get(entry.getKey()));
@@ -102,23 +102,20 @@ public class ExecutorAdminUtils {
    * @param brokersToCheck List of broker to check.
    * @param adminClient The adminClient to send describeLogDirs request.
    * @param config The config object that holds all the Cruise Control related configs
-   * @return True if there is ongoing intra-broker replica movement.
+   * @return {@code true} if there is ongoing intra-broker replica movement.
    */
-  static boolean isOngoingIntraBrokerReplicaMovement(Collection<Integer> brokersToCheck, AdminClient adminClient,
-                                                     KafkaCruiseControlConfig config) {
-    Map<Integer, KafkaFuture<Map<String, LogDirInfo>>> logDirsByBrokerId = adminClient.describeLogDirs(brokersToCheck).values();
-    for (Map.Entry<Integer, KafkaFuture<Map<String, LogDirInfo>>> entry : logDirsByBrokerId.entrySet()) {
-      try {
-        Map<String, LogDirInfo> logInfos = entry.getValue().get(config.getLong(LOGDIR_RESPONSE_TIMEOUT_MS_CONFIG), TimeUnit.MILLISECONDS);
-        for (LogDirInfo info : logInfos.values()) {
-          if (info.error == Errors.NONE) {
-            if (info.replicaInfos.values().stream().anyMatch(i -> i.isFuture)) {
-              return true;
-            }
+  static boolean hasOngoingIntraBrokerReplicaMovement(Collection<Integer> brokersToCheck, AdminClient adminClient,
+                                                      KafkaCruiseControlConfig config)
+      throws InterruptedException, ExecutionException, TimeoutException {
+    Map<Integer, KafkaFuture<Map<String, LogDirDescription>>> logDirsByBrokerId = adminClient.describeLogDirs(brokersToCheck).descriptions();
+    for (Map.Entry<Integer, KafkaFuture<Map<String, LogDirDescription>>> entry : logDirsByBrokerId.entrySet()) {
+      Map<String, LogDirDescription> logInfos = entry.getValue().get(config.getLong(LOGDIR_RESPONSE_TIMEOUT_MS_CONFIG), TimeUnit.MILLISECONDS);
+      for (LogDirDescription info : logInfos.values()) {
+        if (info.error() == null) {
+          if (info.replicaInfos().values().stream().anyMatch(ReplicaInfo::isFuture)) {
+            return true;
           }
         }
-      } catch (InterruptedException | TimeoutException | ExecutionException e) {
-        //Let it go.
       }
     }
     return false;

@@ -5,9 +5,9 @@
 package com.linkedin.cruisecontrol.servlet.parameters;
 
 import com.linkedin.cruisecontrol.common.CruiseControlConfigurable;
+import com.linkedin.cruisecontrol.http.CruiseControlRequestContext;
 import com.linkedin.cruisecontrol.servlet.EndPoint;
 import java.util.SortedSet;
-import javax.servlet.http.HttpServletResponse;
 
 
 /**
@@ -19,25 +19,24 @@ public interface CruiseControlParameters extends CruiseControlConfigurable {
 
   /**
    * Parse the parameters set in HTTP request to initialize object.
+   * @param requestContext The request context
    *
-   * @param response HTTP response of Cruise Control. Populated in case of a parameter parse exception.
-   * @return True if there has been a failure to parse parameters, false otherwise. If the object is already initialized,
+   * @return {@code true} if there has been a failure to parse parameters, {@code false} otherwise. If the object is already initialized,
    *         directly return false.
    */
-  boolean parseParameters(HttpServletResponse response);
-
+  boolean parseParameters(CruiseControlRequestContext requestContext);
   /**
    * @return Endpoint for which the parameters are parsed.
    */
   EndPoint endPoint();
 
   /**
-   * @return True if requested response is in JSON, false otherwise.
+   * @return {@code true} if requested response is in JSON, {@code false} otherwise.
    */
   boolean json();
 
   /**
-   * @return True if requested response should contain a JSON schema in the header, false otherwise.
+   * @return {@code true} if requested response should contain a JSON schema in the header, {@code false} otherwise.
    */
   boolean wantResponseSchema();
 

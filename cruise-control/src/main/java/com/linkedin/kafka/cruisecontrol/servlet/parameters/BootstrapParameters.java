@@ -15,6 +15,7 @@ import java.util.TreeSet;
 import static com.linkedin.kafka.cruisecontrol.servlet.parameters.ParameterUtils.START_MS_PARAM;
 import static com.linkedin.kafka.cruisecontrol.servlet.parameters.ParameterUtils.END_MS_PARAM;
 import static com.linkedin.kafka.cruisecontrol.servlet.parameters.ParameterUtils.CLEAR_METRICS_PARAM;
+import static com.linkedin.kafka.cruisecontrol.servlet.parameters.ParameterUtils.DEVELOPER_MODE_PARAM;
 
 
 /**
@@ -23,13 +24,13 @@ import static com.linkedin.kafka.cruisecontrol.servlet.parameters.ParameterUtils
  * <pre>
  * 1. RANGE MODE:
  *    GET /kafkacruisecontrol/bootstrap?start=[START_TIMESTAMP]&amp;end=[END_TIMESTAMP]&amp;clearmetrics=[true/false]
- *    &amp;json=[true/false]&amp;get_response_schema=[true/false]
+ *    &amp;json=[true/false]&amp;get_response_schema=[true/false]&amp;developer_mode=[true/false]&amp;doAs=[user]
  * 2. SINCE MODE:
  *    GET /kafkacruisecontrol/bootstrap?start=[START_TIMESTAMP]&amp;clearmetrics=[true/false]&amp;json=[true/false]
- *    &amp;get_response_schema=[true/false]
+ *    &amp;get_response_schema=[true/false]&amp;developer_mode=[true/false]&amp;doAs=[user]
  * 3. RECENT MODE:
  *    GET /kafkacruisecontrol/bootstrap?clearmetrics=[true/false]&amp;json=[true/false]
- *    &amp;get_response_schema=[true/false]
+ *    &amp;get_response_schema=[true/false]&amp;developer_mode=[true/false]&amp;doAs=[user]
  * </pre>
  */
 public class BootstrapParameters extends AbstractParameters {
@@ -39,12 +40,14 @@ public class BootstrapParameters extends AbstractParameters {
     validParameterNames.add(START_MS_PARAM);
     validParameterNames.add(END_MS_PARAM);
     validParameterNames.add(CLEAR_METRICS_PARAM);
+    validParameterNames.add(DEVELOPER_MODE_PARAM);
     validParameterNames.addAll(AbstractParameters.CASE_INSENSITIVE_PARAMETER_NAMES);
     CASE_INSENSITIVE_PARAMETER_NAMES = Collections.unmodifiableSortedSet(validParameterNames);
   }
   protected Long _startMs;
   protected Long _endMs;
   protected boolean _clearMetrics;
+  protected boolean _developerMode;
 
   public BootstrapParameters() {
     super();
@@ -53,11 +56,15 @@ public class BootstrapParameters extends AbstractParameters {
   @Override
   protected void initParameters() throws UnsupportedEncodingException {
     super.initParameters();
-    _startMs = ParameterUtils.startMs(_request);
-    _endMs = ParameterUtils.endMs(_request);
-    _clearMetrics = ParameterUtils.clearMetrics(_request);
+    _startMs = ParameterUtils.startMsOrDefault(_requestContext, null);
+    _endMs = ParameterUtils.endMsOrDefault(_requestContext, null);
+    _clearMetrics = ParameterUtils.clearMetrics(_requestContext);
+    _developerMode = ParameterUtils.developerMode(_requestContext);
     if (_startMs == null && _endMs != null) {
       throw new UserRequestException("The start time cannot be empty when end time is specified.");
+    }
+    if (_startMs != null && _endMs != null) {
+      ParameterUtils.validateTimeRange(_startMs, _endMs);
     }
   }
 
@@ -71,6 +78,10 @@ public class BootstrapParameters extends AbstractParameters {
 
   public boolean clearMetrics() {
     return _clearMetrics;
+  }
+
+  public boolean developerMode() {
+    return _developerMode;
   }
 
   @Override

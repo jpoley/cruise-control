@@ -103,20 +103,18 @@ public class ResponseTest {
    * @param operation The OpenAPI operation for certain endpoint.
    */
   private void checkOperation(Operation operation) {
-    operation.getResponses().forEach((responseStatus, apiResponse) -> {
-      apiResponse.getContent().forEach((header, type) -> {
-        switch (header) {
-          case JSON_CONTENT_TYPE : String refName = type.getSchema().get$ref();
-                                   String className = refName.substring(refName.lastIndexOf('/') + 1);
-                                   checkSchema(_openAPI.getComponents().getSchemas().get(className), className, true);
-                                   break;
-          case PLAIN_TEXT_CONTENT_TYPE : assertTrue(type.getSchema() instanceof StringSchema);
-                                         break;
-          default: fail("Unknown content type " + header);
-                   break;
-        }
-      });
-    });
+    operation.getResponses().forEach((responseStatus, apiResponse) -> apiResponse.getContent().forEach((header, type) -> {
+      switch (header) {
+        case JSON_CONTENT_TYPE : String refName = type.getSchema().get$ref();
+                                 String className = refName.substring(refName.lastIndexOf('/') + 1);
+                                 checkSchema(_openAPI.getComponents().getSchemas().get(className), className, true);
+                                 break;
+        case PLAIN_TEXT_CONTENT_TYPE : assertTrue(type.getSchema() instanceof StringSchema);
+                                       break;
+        default: fail("Unknown content type " + header);
+                 break;
+      }
+    }));
   }
 
   /**
@@ -148,7 +146,7 @@ public class ResponseTest {
       if (properties.size() - fields.size() == 1) {
         assertTrue(properties.get(VERSION) instanceof IntegerSchema);
       } else {
-        assertEquals(properties.size(), fields.size());
+        assertEquals(className, properties.size(), fields.size());
       }
     }
 
@@ -170,11 +168,8 @@ public class ResponseTest {
           }
         }
 
-        if (schemaToCheck instanceof StringSchema ||
-            schemaToCheck instanceof IntegerSchema ||
-            schemaToCheck instanceof NumberSchema ||
-            schemaToCheck instanceof ComposedSchema ||
-            schemaToCheck instanceof BooleanSchema) {
+        if (schemaToCheck instanceof StringSchema || schemaToCheck instanceof IntegerSchema || schemaToCheck instanceof NumberSchema
+            || schemaToCheck instanceof ComposedSchema || schemaToCheck instanceof BooleanSchema) {
           return;
         }
         assertNotEquals(schemaToCheck.get$ref(), null);

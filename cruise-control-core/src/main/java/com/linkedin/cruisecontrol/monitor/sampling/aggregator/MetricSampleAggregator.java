@@ -38,7 +38,7 @@ import org.slf4j.LoggerFactory;
  *   From per entity's perspective, each entity would have sufficient metrics from all the windows when everything
  *   works fine. However, it is also possible that some metrics may be missing from the MetricSampleAggregator
  *   in one or more windows. If that happens, some {@link Extrapolation} will be used to fill in the missing data.
- *   If none of the {@link Extrapolation} works. We claim the entity is <tt>invalid</tt> in this window. With above,
+ *   If none of the {@link Extrapolation} works. We claim the entity is {@code invalid} in this window. With above,
  *   a given entity may have the following three states in any given window from the {@link MetricSampleAggregator}'s
  *   perspective:
  *   <ul>
@@ -68,7 +68,7 @@ import org.slf4j.LoggerFactory;
  *   </ul>
  *
  * <p>
- *   From per window's perspective, for each window, there is a given set of <tt>valid</tt> entities and entity
+ *   From per window's perspective, for each window, there is a given set of {@code valid} entities and entity
  *   groups as described above. The validity of a window depends on the requirements specified in the
  *   {@link AggregationOptions} during the aggregation. More specifically whether the entity coverage (valid entity
  *   ratio) and entity group coverage (valid entity group ratio) meet the requirements.
@@ -136,7 +136,7 @@ public class MetricSampleAggregator<G, E extends Entity<G>> extends LongGenerati
    *
    * @param sample The metric sample to add.
    *
-   * @return True if the sample is accepted, false if the sample is ignored.
+   * @return {@code true} if the sample is accepted, {@code false} if the sample is ignored.
    */
   public boolean addSample(MetricSample<G, E> sample) {
     if (!sample.isValid(_metricDef)) {
@@ -199,8 +199,9 @@ public class MetricSampleAggregator<G, E extends Entity<G>> extends LongGenerati
       long fromWindowIndex = Math.max(windowIndex(from), _oldestWindowIndex);
       long toWindowIndex = Math.min(windowIndex(to), _currentWindowIndex - 1);
       if (fromWindowIndex > _currentWindowIndex || toWindowIndex < _oldestWindowIndex) {
-        throw new NotEnoughValidWindowsException(String.format("There is no window available in range [%d, %d]",
-                                                               from, to));
+        throw new NotEnoughValidWindowsException(String.format("There is no window available in range [%d, %d] (index [%d, %d])."
+                                                               + " Window index (current: %d, oldest: %d).", from, to,
+                                                               fromWindowIndex, toWindowIndex, _currentWindowIndex, _oldestWindowIndex));
       }
 
       // Get and verify the completeness.
@@ -216,9 +217,11 @@ public class MetricSampleAggregator<G, E extends Entity<G>> extends LongGenerati
       MetricSampleAggregationResult<G, E> result = new MetricSampleAggregationResult<>(generation(), completeness);
       Set<E> entitiesToInclude =
           interpretedOptions.includeInvalidEntities() ? interpretedOptions.interestedEntities() : completeness.validEntities();
+      LOG.debug("Including {} entities during metric aggregation.", entitiesToInclude.size());
       for (E entity : entitiesToInclude) {
         RawMetricValues rawValues = _rawMetrics.get(entity);
         if (rawValues == null) {
+          LOG.debug("Failed to find entity {} from _rawMetrics.", entity);
           ValuesAndExtrapolations
               valuesAndExtrapolations = ValuesAndExtrapolations.empty(completeness.validWindowIndices().size(), _metricDef);
           valuesAndExtrapolations.setWindows(windows);
@@ -423,6 +426,7 @@ public class MetricSampleAggregator<G, E extends Entity<G>> extends LongGenerati
 
   /**
    * Package private for testing.
+   * @return Metric sample aggregator state.
    */
   MetricSampleAggregatorState<G, E> aggregatorState() {
     maybeUpdateAggregatorState();
@@ -514,7 +518,7 @@ public class MetricSampleAggregator<G, E extends Entity<G>> extends LongGenerati
       numAbandonedSamples += rawValues.resetWindowIndices(prevOldestWindowIndex, numIndicesToReset);
     }
 
-    for (; iterator.hasNext(); ) {
+    while (iterator.hasNext()) {
       RawMetricValues rawValues = iterator.next();
       rawValues.updateOldestWindowIndex(currentOldestWindowIndex);
       numAbandonedSamples += rawValues.resetWindowIndices(prevOldestWindowIndex, numIndicesToReset);
@@ -560,10 +564,11 @@ public class MetricSampleAggregator<G, E extends Entity<G>> extends LongGenerati
   }
 
   /**
-   * The absolute window index of the given timestamp.
+   * @param timeMs Time in milliseconds.
+   * @return The absolute window index of the given timestamp.
    */
-  private long windowIndex(long time) {
-    return time / _windowMs + 1;
+  private long windowIndex(long timeMs) {
+    return timeMs / _windowMs + 1;
   }
 
   /**

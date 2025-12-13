@@ -7,8 +7,10 @@ package com.linkedin.kafka.cruisecontrol.monitor.sampling;
 import com.linkedin.cruisecontrol.metricdef.MetricDef;
 import com.linkedin.cruisecontrol.metricdef.MetricInfo;
 import com.linkedin.kafka.cruisecontrol.common.Resource;
-import com.linkedin.kafka.cruisecontrol.exception.MetricSamplingException;
+import com.linkedin.kafka.cruisecontrol.config.constants.MonitorConfig;
 import com.linkedin.kafka.cruisecontrol.metricsreporter.exception.UnknownVersionException;
+import com.linkedin.kafka.cruisecontrol.metricsreporter.metric.CruiseControlMetric;
+import com.linkedin.kafka.cruisecontrol.metricsreporter.metric.MetricSerde;
 import com.linkedin.kafka.cruisecontrol.metricsreporter.metric.RawMetricType;
 import com.linkedin.kafka.cruisecontrol.model.ModelUtils;
 import com.linkedin.kafka.cruisecontrol.monitor.metricdefinition.KafkaMetricDef;
@@ -17,25 +19,30 @@ import com.linkedin.kafka.cruisecontrol.monitor.sampling.holder.BrokerMetricSamp
 import com.linkedin.kafka.cruisecontrol.monitor.sampling.holder.PartitionMetricSample;
 import java.util.Collection;
 import java.util.HashMap;
-import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
-import org.apache.kafka.clients.consumer.OffsetAndTimestamp;
+import org.apache.kafka.clients.consumer.Consumer;
+import org.apache.kafka.clients.consumer.ConsumerConfig;
 import org.apache.kafka.common.Cluster;
 import org.apache.kafka.common.Node;
 import org.apache.kafka.common.TopicPartition;
+import org.apache.kafka.common.serialization.ByteArrayDeserializer;
+import org.apache.kafka.common.serialization.StringDeserializer;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import static com.linkedin.kafka.cruisecontrol.KafkaCruiseControlUtils.createConsumer;
 import static com.linkedin.kafka.cruisecontrol.config.constants.MonitorConfig.SAMPLING_ALLOW_CPU_CAPACITY_ESTIMATION_CONFIG;
 import static com.linkedin.kafka.cruisecontrol.metricsreporter.metric.RawMetricType.*;
+import static com.linkedin.kafka.cruisecontrol.monitor.sampling.CruiseControlMetricsReporterSampler.METRIC_REPORTER_SAMPLER_BOOTSTRAP_SERVERS;
 
 
-public class SamplingUtils {
+public final class SamplingUtils {
   private static final Logger LOG = LoggerFactory.getLogger(SamplingUtils.class);
   private static final String SKIP_BUILDING_SAMPLE_PREFIX = "Skip generating metric sample for ";
   public static final int UNRECOGNIZED_BROKER_ID = -1;
+  public static final int LOADING_PROGRESS = -1;
 
   private SamplingUtils() {
   }
@@ -50,7 +57,7 @@ public class SamplingUtils {
    */
   static Map<Integer, Map<String, Integer>> leaderDistribution(Cluster cluster) {
     List<Node> clusterNodes = cluster.nodes();
-    Map<Integer, Map<String, Integer>> stats = new HashMap<>(clusterNodes.size());
+    Map<Integer, Map<String, Integer>> stats = new HashMap<>();
     for (Node node : clusterNodes) {
       Map<String, Integer> numLeadersByTopic = new HashMap<>();
       stats.put(node.id(), numLeadersByTopic);
@@ -71,7 +78,7 @@ public class SamplingUtils {
    * @return The estimated CPU utilization of the leader for the partition based on the static model, or {@code null}
    * if estimation is not possible.
    */
-  private static Double estimateLeaderCpuUtil(PartitionMetricSample pms, BrokerLoad brokerLoad, MetricDef commonMetricDef, short numCpuCores) {
+  private static Double estimateLeaderCpuUtil(PartitionMetricSample pms, BrokerLoad brokerLoad, MetricDef commonMetricDef, double numCpuCores) {
     double partitionBytesInRate = pms.metricValue(commonMetricDef.metricInfo(KafkaMetricDef.LEADER_BYTES_IN.name()).id());
     double partitionBytesOutRate = pms.metricValue(commonMetricDef.metricInfo(KafkaMetricDef.LEADER_BYTES_OUT.name()).id());
     double partitionReplicationBytesOutRate = pms.metricValue(commonMetricDef.metricInfo(KafkaMetricDef.REPLICATION_BYTES_OUT_RATE.name()).id());
@@ -118,29 +125,6 @@ public class SamplingUtils {
   }
 
   /**
-   * Check whether there are failures in fetching offsets during sampling.
-   *
-   * @param endOffsets End offsets retrieved by consumer.
-   * @param offsetsForTimes Offsets for times retrieved by consumer.
-   */
-  static void sanityCheckOffsetFetch(Map<TopicPartition, Long> endOffsets,
-                                     Map<TopicPartition, OffsetAndTimestamp> offsetsForTimes)
-      throws MetricSamplingException {
-    Set<TopicPartition> failedToFetchOffsets = new HashSet<>();
-    for (Map.Entry<TopicPartition, OffsetAndTimestamp> entry : offsetsForTimes.entrySet()) {
-      if (entry.getValue() == null && endOffsets.get(entry.getKey()) == null) {
-        failedToFetchOffsets.add(entry.getKey());
-      }
-    }
-
-    if (!failedToFetchOffsets.isEmpty()) {
-      throw new MetricSamplingException(String.format("Metric consumer failed to fetch offsets for %s. Consider "
-                                                      + "decreasing reconnect.backoff.ms to mitigate consumption failures"
-                                                      + " due to transient network issues.", failedToFetchOffsets));
-    }
-  }
-
-  /**
    * Removes any dots that potentially exist in the given parameter.
    *
    * @param tp TopicPartition that may contain dots.
@@ -148,8 +132,7 @@ public class SamplingUtils {
    */
   private static TopicPartition partitionHandleDotInTopicName(TopicPartition tp) {
     // In the reported metrics, the "." in the topic name will be replaced by "_".
-    return !tp.topic().contains(".") ? tp :
-           new TopicPartition(replaceDotsWithUnderscores(tp.topic()), tp.partition());
+    return !tp.topic().contains(".") ? tp : new TopicPartition(replaceDotsWithUnderscores(tp.topic()), tp.partition());
   }
 
   /**
@@ -183,7 +166,7 @@ public class SamplingUtils {
                                                           TopicPartition tpDotNotHandled,
                                                           Map<Integer, BrokerLoad> brokerLoadById,
                                                           long maxMetricTimestamp,
-                                                          Map<Integer, Short> cachedNumCoresByBroker,
+                                                          Map<Integer, Double> cachedNumCoresByBroker,
                                                           Map<Integer, Integer> skippedPartitionByBroker) {
     Node leaderNode = cluster.leaderFor(tpDotNotHandled);
     if (leaderNode == null) {
@@ -272,13 +255,13 @@ public class SamplingUtils {
    * @param leaderId Leader Id of partition.
    * @param brokerLoad Load information for the broker that the leader of the partition resides.
    * @param cachedNumCoresByBroker Cached number of cores by broker.
-   * @return True to skip generating partition metric sample, false otherwise.
+   * @return {@code true} to skip generating partition metric sample, {@code false} otherwise.
    */
   private static boolean skipBuildingPartitionMetricSample(TopicPartition tpDotNotHandled,
                                                            TopicPartition tpWithDotHandled,
                                                            int leaderId,
                                                            BrokerLoad brokerLoad,
-                                                           Map<Integer, Short> cachedNumCoresByBroker) {
+                                                           Map<Integer, Double> cachedNumCoresByBroker) {
     if (brokerLoad == null || !brokerLoad.brokerMetricAvailable(BROKER_CPU_UTIL)) {
       // Broker load or its BROKER_CPU_UTIL metric is not available.
       LOG.debug("{}partition {} because {} metric for broker {} is unavailable.", SKIP_BUILDING_SAMPLE_PREFIX,
@@ -305,7 +288,7 @@ public class SamplingUtils {
    *
    * @param brokerLoad Broker load.
    * @param brokerId Broker id
-   * @return True to skip generating broker metric sample, false otherwise.
+   * @return {@code true} to skip generating broker metric sample, {@code false} otherwise.
    */
   private static boolean skipBuildingBrokerMetricSample(BrokerLoad brokerLoad, int brokerId) {
     if (brokerLoad == null) {
@@ -323,5 +306,52 @@ public class SamplingUtils {
     }
 
     return false;
+  }
+
+  /**
+   * Create a Kafka consumer for retrieving reported Cruise Control metrics.
+   * The consumer uses {@link String} for keys and {@link CruiseControlMetric} for values.
+   *
+   * This consumer is not intended to use (1) the group management functionality by using subscribe(topic) or (2) the Kafka-based
+   * offset management strategy. Hence, the {@link ConsumerConfig#GROUP_ID_CONFIG} config is irrelevant to it.
+   *
+   * @param configs The configurations for Cruise Control.
+   * @param clientIdPrefix Client id prefix.
+   * @return A new Kafka consumer
+   */
+  public static Consumer<String, CruiseControlMetric> createMetricConsumer(Map<String, ?> configs, String clientIdPrefix) {
+    // Get bootstrap servers
+    String bootstrapServers = (String) configs.get(METRIC_REPORTER_SAMPLER_BOOTSTRAP_SERVERS);
+    if (bootstrapServers == null) {
+      bootstrapServers = bootstrapServers(configs);
+    }
+    return createConsumer(configs, clientIdPrefix, bootstrapServers, StringDeserializer.class, MetricSerde.class, true);
+  }
+
+  /**
+   * Retrieve comma separated bootstrap servers from the configurations for Cruise Control for configuring
+   * {@link org.apache.kafka.clients.CommonClientConfigs#BOOTSTRAP_SERVERS_CONFIG}.
+   *
+   * @param config The configurations for Cruise Control.
+   * @return Comma separated bootstrap servers.
+   */
+  @SuppressWarnings("unchecked")
+  public static String bootstrapServers(Map<String, ?> config) {
+    return String.join(",", (List<String>) config.get(MonitorConfig.BOOTSTRAP_SERVERS_CONFIG));
+  }
+
+  /**
+   * Create a Kafka consumer for retrieving samples from the Sample Store.
+   * The consumer uses {@link ByteArrayDeserializer} for both key and values.
+   *
+   * This consumer is not intended to use (1) the group management functionality by using subscribe(topic) or (2) the Kafka-based
+   * offset management strategy. Hence, the {@link ConsumerConfig#GROUP_ID_CONFIG} config is irrelevant to it.
+   *
+   * @param configs The configurations for Cruise Control.
+   * @param clientIdPrefix Client id prefix.
+   * @return A new Kafka consumer
+   */
+  public static Consumer<byte[], byte[]> createSampleStoreConsumer(Map<String, ?> configs, String clientIdPrefix) {
+    return createConsumer(configs, clientIdPrefix, bootstrapServers(configs), ByteArrayDeserializer.class, ByteArrayDeserializer.class, false);
   }
 }

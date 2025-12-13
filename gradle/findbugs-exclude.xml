@@ -50,6 +50,7 @@
       <Bug pattern="EC_NULL_ARG"/>
       <Bug pattern="NP_ALWAYS_NULL"/>
       <Bug pattern="MS_CANNOT_BE_FINAL"/>
+      <Bug pattern="MS_PKGPROTECT"/>
     </Or>
   </Match>
 
@@ -60,9 +61,10 @@
   </Match>
 
   <Match>
-    <Class name="com.linkedin.kafka.cruisecontrol.model.ClusterModelStats" />
-    <Method name="utilizationMatrix" />
-    <Bug pattern="EI_EXPOSE_REP" />
+    <Or>
+      <Bug pattern="EI_EXPOSE_REP"/>
+      <Bug pattern="EI_EXPOSE_REP2"/>
+    </Or>
   </Match>
 
   <Match>
@@ -77,5 +79,13 @@
     <Bug pattern="SF_SWITCH_FALLTHROUGH" />
   </Match>
 
+  <Match>
+    <Bug pattern="CT_CONSTRUCTOR_THROW"/>
+  </Match>
+
+  <!-- False positive of DMI_RANDOM_USED_ONLY_ONCE (see https://github.com/spotbugs/spotbugs/issues/1539) -->
+  <Match>
+    <Bug pattern="DMI_RANDOM_USED_ONLY_ONCE, ..." />
+  </Match>
 
 </FindBugsFilter>

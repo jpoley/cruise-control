@@ -14,36 +14,36 @@ import java.util.Set;
 import java.util.SortedSet;
 import java.util.TreeSet;
 import org.apache.kafka.common.Cluster;
+import org.apache.kafka.common.PartitionInfo;
 
 /**
  * An abstract class for replica movement strategy. This class will be extended to create custom strategy to determine the
  * execution order the replica movement tasks.
  */
 public abstract class AbstractReplicaMovementStrategy implements ReplicaMovementStrategy {
+  protected static final int PRIORITIZE_TASK_1 = -1;
+  protected static final int PRIORITIZE_TASK_2 = 1;
+  protected static final int PRIORITIZE_NONE = 0;
 
   @Override
   public ReplicaMovementStrategy chain(ReplicaMovementStrategy strategy) {
     AbstractReplicaMovementStrategy current = this;
-    return new ReplicaMovementStrategy() {
+    return new AbstractReplicaMovementStrategy() {
       @Override
-      public Map<Integer, SortedSet<ExecutionTask>> applyStrategy(Set<ExecutionTask> replicaMovementTasks, Cluster cluster) {
-        return current.applyStrategy(replicaMovementTasks, cluster);
-      }
-
-      @Override
-      public ReplicaMovementStrategy chain(ReplicaMovementStrategy strategy) {
-        return current.chain(strategy);
-      }
-
-      @Override
-      public Comparator<ExecutionTask> taskComparator(Cluster cluster) {
-        Comparator<ExecutionTask> comparator1 = current.taskComparator(cluster);
-        Comparator<ExecutionTask> comparator2 = strategy.taskComparator(cluster);
+      public Comparator<ExecutionTask> taskComparator(StrategyOptions strategyOptions) {
+        Comparator<ExecutionTask> comparator1 = current.taskComparator(strategyOptions);
+        Comparator<ExecutionTask> comparator2 = strategy.taskComparator(strategyOptions);
 
         return (task1, task2) -> {
           int compareResult1 = comparator1.compare(task1, task2);
           return compareResult1 == 0 ? comparator2.compare(task1, task2) : compareResult1;
         };
+      }
+
+      @Override
+      public Comparator<ExecutionTask> taskComparator(Cluster cluster) {
+        StrategyOptions strategyOptions = new StrategyOptions.Builder(cluster).build();
+        return taskComparator(strategyOptions);
       }
 
       @Override
@@ -54,7 +54,12 @@ public abstract class AbstractReplicaMovementStrategy implements ReplicaMovement
   }
 
   @Override
-  public Map<Integer, SortedSet<ExecutionTask>> applyStrategy(Set<ExecutionTask> replicaMovementTasks, Cluster cluster) {
+  public ReplicaMovementStrategy chainBaseReplicaMovementStrategyIfAbsent() {
+    return this.name().contains(BaseReplicaMovementStrategy.class.getSimpleName()) ? this : this.chain(new BaseReplicaMovementStrategy());
+  }
+
+  @Override
+  public Map<Integer, SortedSet<ExecutionTask>> applyStrategy(Set<ExecutionTask> replicaMovementTasks, StrategyOptions strategyOptions) {
     Map<Integer, SortedSet<ExecutionTask>> tasksByBrokerId = new HashMap<>();
 
     for (ExecutionTask task : replicaMovementTasks) {
@@ -62,20 +67,30 @@ public abstract class AbstractReplicaMovementStrategy implements ReplicaMovement
 
       // Add the task to source broker's execution plan
       SortedSet<ExecutionTask> sourceBrokerTaskSet = tasksByBrokerId.computeIfAbsent(proposal.oldLeader().brokerId(),
-                                                                                     k -> new TreeSet<>(taskComparator(cluster)));
+                                                                                     k -> new TreeSet<>(taskComparator(strategyOptions)));
       if (!sourceBrokerTaskSet.add(task)) {
-        throw new IllegalStateException("Replica movement strategy " + this.getClass().getSimpleName() + " is unable to determine order of all tasks.");
+        throw new IllegalStateException("Replica movement strategy " + this.getClass().getSimpleName() + " failed to determine order of tasks.");
       }
 
       // Add the task to destination brokers' execution plan
       for (ReplicaPlacementInfo destinationBroker : proposal.replicasToAdd()) {
         SortedSet<ExecutionTask> destinationBrokerTaskSet = tasksByBrokerId.computeIfAbsent(destinationBroker.brokerId(),
-                                                                                            k -> new TreeSet<>(taskComparator(cluster)));
+                                                                                            k -> new TreeSet<>(taskComparator(strategyOptions)));
         if (!destinationBrokerTaskSet.add(task)) {
-          throw new IllegalStateException("Replica movement strategy " + this.getClass().getSimpleName() + " is unable to determine order of all tasks.");
+          throw new IllegalStateException("Replica movement strategy " + this.getClass().getSimpleName() + " failed to determine order of tasks.");
         }
       }
     }
     return tasksByBrokerId;
+  }
+
+  @Override
+  public Map<Integer, SortedSet<ExecutionTask>> applyStrategy(Set<ExecutionTask> replicaMovementTasks, Cluster cluster) {
+    StrategyOptions strategyOptions = new StrategyOptions.Builder(cluster).build();
+    return applyStrategy(replicaMovementTasks, strategyOptions);
+  }
+
+  protected static boolean isTaskInSet(ExecutionTask task, Set<PartitionInfo> partitionInfoSet) {
+    return partitionInfoSet.stream().anyMatch(p -> p.topic().equals(task.proposal().topic()) && p.partition() == task.proposal().partitionId());
   }
 }

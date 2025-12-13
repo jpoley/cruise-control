@@ -20,7 +20,7 @@ import static com.linkedin.kafka.cruisecontrol.servlet.parameters.ParameterUtils
  *
  * <pre>
  *    GET /kafkacruisecontrol/review_board?json=[true/false]&amp;review_ids=[id1,id2,...]
- *    &amp;get_response_schema=[true/false]
+ *    &amp;get_response_schema=[true/false]&amp;doAs=[user]
  * </pre>
  */
 public class ReviewBoardParameters extends AbstractParameters {
@@ -40,7 +40,7 @@ public class ReviewBoardParameters extends AbstractParameters {
   @Override
   protected void initParameters() throws UnsupportedEncodingException {
     super.initParameters();
-    _reviewIds = ParameterUtils.reviewIds(_request);
+    _reviewIds = ParameterUtils.reviewIds(_requestContext);
   }
 
   public Set<Integer> reviewIds() {

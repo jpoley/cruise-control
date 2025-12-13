@@ -30,8 +30,8 @@ import java.util.function.Function;
  */
 public class SortedReplicasHelper {
 
-  private Set<Function<Replica, Boolean>> _selectionFuncs;
-  private Set<Function<Replica, Integer>> _priorityFuncs;
+  private final Set<Function<Replica, Boolean>> _selectionFuncs;
+  private final Set<Function<Replica, Integer>> _priorityFuncs;
   private Function<Replica, Double> _scoreFunc;
 
   public SortedReplicasHelper() {
@@ -62,7 +62,6 @@ public class SortedReplicasHelper {
   public SortedReplicasHelper addSelectionFunc(Function<Replica, Boolean> selectionFunc) {
     return maybeAddSelectionFunc(selectionFunc, true);
   }
-
 
   /**
    * If condition holds, add a priority function to the {@link SortedReplicas} to be created.

@@ -21,6 +21,7 @@ import org.apache.kafka.common.Cluster;
 import org.apache.kafka.common.metrics.Metrics;
 import org.apache.kafka.common.network.ChannelBuilder;
 import org.apache.kafka.common.requests.MetadataResponse;
+import org.apache.kafka.common.utils.LogContext;
 import org.apache.kafka.common.utils.Time;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -28,6 +29,7 @@ import org.slf4j.LoggerFactory;
 
 public class MetadataClient {
   private static final Logger LOG = LoggerFactory.getLogger(MetadataClient.class);
+  private static final LogContext LOG_CONTEXT = new LogContext();
   private static final int DEFAULT_MAX_IN_FLIGHT_REQUEST = 1;
   private final AtomicInteger _metadataGeneration;
   private final Metadata _metadata;
@@ -42,19 +44,19 @@ public class MetadataClient {
                         Time time) {
     _metadataGeneration = new AtomicInteger(0);
     _metadata = metadata;
-    _refreshMetadataTimeout = config.getLong(MonitorConfig.METADATA_MAX_AGE_CONFIG);
+    _refreshMetadataTimeout = config.getLong(MonitorConfig.METADATA_MAX_AGE_MS_CONFIG);
     _time = time;
     List<InetSocketAddress> addresses =
         ClientUtils.parseAndValidateAddresses(config.getList(MonitorConfig.BOOTSTRAP_SERVERS_CONFIG),
-                                              ClientDnsLookup.DEFAULT);
+                                              ClientDnsLookup.USE_ALL_DNS_IPS);
     Cluster bootstrapCluster = Cluster.bootstrap(addresses);
     MetadataResponse metadataResponse = KafkaCruiseControlUtils.prepareMetadataResponse(bootstrapCluster.nodes(),
                                                                                         bootstrapCluster.clusterResource().clusterId(),
                                                                                         MetadataResponse.NO_CONTROLLER_ID,
                                                                                         Collections.emptyList());
 
-    _metadata.update(KafkaCruiseControlUtils.REQUEST_VERSION_UPDATE, metadataResponse, time.milliseconds());
-    ChannelBuilder channelBuilder = ClientUtils.createChannelBuilder(config, time);
+    _metadata.update(KafkaCruiseControlUtils.REQUEST_VERSION_UPDATE, metadataResponse, false, time.milliseconds());
+    ChannelBuilder channelBuilder = ClientUtils.createChannelBuilder(config, time, LOG_CONTEXT);
     NetworkClientProvider provider = config.getConfiguredInstance(MonitorConfig.NETWORK_CLIENT_PROVIDER_CLASS_CONFIG,
                                                                   NetworkClientProvider.class);
 
@@ -71,9 +73,13 @@ public class MetadataClient {
                                                   config.getInt(MonitorConfig.SEND_BUFFER_CONFIG),
                                                   config.getInt(MonitorConfig.RECEIVE_BUFFER_CONFIG),
                                                   config.getInt(MonitorConfig.REQUEST_TIMEOUT_MS_CONFIG),
+                                                  config.getLong(MonitorConfig.SOCKET_CONNECTION_SETUP_TIMEOUT_MS_CONFIG),
+                                                  config.getLong(MonitorConfig.SOCKET_CONNECTION_SETUP_TIMEOUT_MAX_MS_CONFIG),
                                                   true,
                                                   new ApiVersions());
     _metadataTTL = metadataTTL;
+    // Ensure that the initial metadata is valid.
+    doRefreshMetadata(_refreshMetadataTimeout);
   }
 
   /**
@@ -86,35 +92,40 @@ public class MetadataClient {
 
   /**
    * Refresh the metadata. The method is synchronized because the network client is not thread safe.
+   * @param timeoutMs Timeout in milliseconds.
    * @return A new {@link ClusterAndGeneration} with latest cluster and generation.
    */
-  public synchronized ClusterAndGeneration refreshMetadata(long timeout) {
+  public synchronized ClusterAndGeneration refreshMetadata(long timeoutMs) {
     // Do not update metadata if the metadata has just been refreshed.
     if (_time.milliseconds() >= _metadata.lastSuccessfulUpdate() + _metadataTTL) {
-      int updateVersion = _metadata.requestUpdate();
-      long remaining = timeout;
-      Cluster beforeUpdate = _metadata.fetch();
-      boolean isMetadataUpdated = _metadata.updateVersion() > updateVersion;
-      while (!isMetadataUpdated && remaining > 0) {
-        _metadata.requestUpdate();
-        long start = _time.milliseconds();
-        _networkClient.poll(remaining, start);
-        remaining -= (_time.milliseconds() - start);
-        isMetadataUpdated = _metadata.updateVersion() > updateVersion;
-      }
-      if (isMetadataUpdated) {
-        if (LOG.isDebugEnabled()) {
-          LOG.debug("Updated metadata {}", _metadata.fetch());
-        }
-        if (MonitorUtils.metadataChanged(beforeUpdate, _metadata.fetch())) {
-          _metadataGeneration.incrementAndGet();
-        }
-      } else {
-        LOG.warn("Failed to update metadata in {}ms. Using old metadata with version {} and last successful update {}.",
-                 timeout, _metadata.updateVersion(), _metadata.lastSuccessfulUpdate());
-      }
+      doRefreshMetadata(timeoutMs);
     }
-    return new ClusterAndGeneration(_metadata.fetch(), _metadataGeneration.get());
+    return clusterAndGeneration();
+  }
+
+  private void doRefreshMetadata(long timeoutMs) {
+    int updateVersion = _metadata.requestUpdate(true);
+    long remaining = timeoutMs;
+    Cluster beforeUpdate = cluster();
+    boolean isMetadataUpdated = _metadata.updateVersion() > updateVersion;
+    while (!isMetadataUpdated && remaining > 0) {
+      _metadata.requestUpdate(false);
+      long start = _time.milliseconds();
+      _networkClient.poll(remaining, start);
+      remaining -= (_time.milliseconds() - start);
+      isMetadataUpdated = _metadata.updateVersion() > updateVersion;
+    }
+    if (isMetadataUpdated) {
+      if (LOG.isDebugEnabled()) {
+        LOG.debug("Updated metadata {}", cluster());
+      }
+      if (MonitorUtils.metadataChanged(beforeUpdate, cluster())) {
+        _metadataGeneration.incrementAndGet();
+      }
+    } else {
+      LOG.warn("Failed to update metadata in {}ms. Using old metadata with version {} and last successful update {}.",
+               timeoutMs, _metadata.updateVersion(), _metadata.lastSuccessfulUpdate());
+    }
   }
 
   /**

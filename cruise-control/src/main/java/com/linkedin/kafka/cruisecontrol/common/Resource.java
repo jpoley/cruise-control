@@ -5,7 +5,6 @@
 package com.linkedin.kafka.cruisecontrol.common;
 
 import com.linkedin.kafka.cruisecontrol.servlet.response.JsonResponseField;
-import java.util.Arrays;
 import java.util.Collections;
 import java.util.List;
 
@@ -34,17 +33,9 @@ public enum Resource {
   private final int _id;
   private final boolean _isHostResource;
   private final boolean _isBrokerResource;
-  private double _epsilon;
+  private final double _epsilon;
 
-  private static final List<Resource> CACHED_VALUES = Collections.unmodifiableList(Arrays.asList(values()));
-
-  /**
-   * Use this instead of values() because values() creates a new array each time.
-   * @return enumerated values in the same order as values()
-   */
-  public static List<Resource> cachedValues() {
-    return CACHED_VALUES;
-  }
+  private static final List<Resource> CACHED_VALUES = List.of(values());
 
   Resource(String resource, int id, boolean isHostResource, boolean isBrokerResource, double epsilon) {
     _resource = resource;
@@ -52,6 +43,14 @@ public enum Resource {
     _isHostResource = isHostResource;
     _isBrokerResource = isBrokerResource;
     _epsilon = epsilon;
+  }
+
+  /**
+   * Use this instead of values() because values() creates a new array each time.
+   * @return enumerated values in the same order as values()
+   */
+  public static List<Resource> cachedValues() {
+    return Collections.unmodifiableList(CACHED_VALUES);
   }
 
   /**
@@ -69,14 +68,14 @@ public enum Resource {
   }
 
   /**
-   * @return True if host resource, false otherwise.
+   * @return {@code true} if host resource, {@code false} otherwise.
    */
   public boolean isHostResource() {
     return _isHostResource;
   }
 
   /**
-   * @return True if broker resource, false otherwise.
+   * @return {@code true} if broker resource, {@code false} otherwise.
    */
   public boolean isBrokerResource() {
     return _isBrokerResource;

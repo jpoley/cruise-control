@@ -26,6 +26,7 @@ import java.util.Collection;
 import java.util.List;
 import java.util.Optional;
 import java.util.SortedSet;
+import java.util.concurrent.TimeUnit;
 import org.apache.kafka.clients.Metadata;
 import org.apache.kafka.common.Cluster;
 import org.apache.kafka.common.TopicPartition;
@@ -33,7 +34,6 @@ import org.apache.kafka.common.protocol.Errors;
 import org.apache.kafka.common.record.RecordBatch;
 import org.apache.kafka.common.requests.MetadataResponse;
 import org.junit.Test;
-
 import java.util.Collections;
 import java.util.Map;
 import java.util.Properties;
@@ -47,7 +47,7 @@ import static com.linkedin.kafka.cruisecontrol.model.LinearRegressionModelParame
 import static com.linkedin.kafka.cruisecontrol.monitor.MonitorUnitTestUtils.getCluster;
 import static com.linkedin.kafka.cruisecontrol.monitor.MonitorUnitTestUtils.getMetadata;
 import static com.linkedin.kafka.cruisecontrol.monitor.MonitorUnitTestUtils.NODE_0;
-import static com.linkedin.kafka.cruisecontrol.monitor.MonitorUnitTestUtils.nodes;
+import static com.linkedin.kafka.cruisecontrol.monitor.MonitorUnitTestUtils.nodeIds;
 import static com.linkedin.kafka.cruisecontrol.monitor.MonitorUtils.UNIT_INTERVAL_TO_PERCENTAGE;
 import static com.linkedin.kafka.cruisecontrol.monitor.metricdefinition.KafkaMetricDef.CPU_USAGE;
 import static com.linkedin.kafka.cruisecontrol.monitor.metricdefinition.KafkaMetricDef.DISK_USAGE;
@@ -64,7 +64,7 @@ import static org.junit.Assert.fail;
 public class KafkaPartitionMetricSampleAggregatorTest {
   private static final int PARTITION = 0;
   private static final int NUM_WINDOWS = 20;
-  private static final long WINDOW_MS = 1000L;
+  private static final long WINDOW_MS = TimeUnit.SECONDS.toMillis(1);
   private static final int MIN_SAMPLES_PER_WINDOW = 4;
   private static final TopicPartition TP = new TopicPartition(TOPIC0, PARTITION);
   private static final PartitionEntity PE = new PartitionEntity(TP);
@@ -90,14 +90,13 @@ public class KafkaPartitionMetricSampleAggregatorTest {
       assertEquals((NUM_WINDOWS - i) * WINDOW_MS, result.valuesAndExtrapolations().get(PE).window(i));
       for (Resource resource : Resource.cachedValues()) {
         Collection<Short> metricIds = KafkaMetricDef.resourceToMetricIds(resource);
-        double expectedValue = (resource == Resource.DISK ?
-            (NUM_WINDOWS - 1 - i) * 10 + MIN_SAMPLES_PER_WINDOW - 1 :
-            (NUM_WINDOWS - 1 - i) * 10 + (MIN_SAMPLES_PER_WINDOW - 1) / 2.0)
-            / (resource == Resource.CPU ? UNIT_INTERVAL_TO_PERCENTAGE : 1.0) * metricIds.size();
+        double expectedValue = (resource == Resource.DISK ? (NUM_WINDOWS - 1 - i) * 10 + MIN_SAMPLES_PER_WINDOW - 1
+                                                          : (NUM_WINDOWS - 1 - i) * 10 + (MIN_SAMPLES_PER_WINDOW - 1) / 2.0)
+                               / (resource == Resource.CPU ? UNIT_INTERVAL_TO_PERCENTAGE : 1.0) * metricIds.size();
         assertEquals("The utilization for " + resource + " should be " + expectedValue,
                      expectedValue, partitionValuesAndExtrapolations.metricValues().valuesForGroup(resource.name(),
-                                                                            KafkaMetricDef.commonMetricDef(),
-                                                                            true).get(i), 0.01);
+                                                                                                   KafkaMetricDef.commonMetricDef(),
+                                                                                                   true).get(i), 0.01);
       }
     }
 
@@ -129,25 +128,24 @@ public class KafkaPartitionMetricSampleAggregatorTest {
                                                          TOPIC0,
                                                          false,
                                                          Collections.singletonList(new MetadataResponse.PartitionMetadata(
-                                                             Errors.NONE, PARTITION, NODE_0,
+                                                             Errors.NONE, TP, Optional.of(NODE_0.id()),
                                                              Optional.of(RecordBatch.NO_PARTITION_LEADER_EPOCH),
-                                                             Arrays.asList(nodes()), Arrays.asList(nodes()),
+                                                             nodeIds(), nodeIds(),
                                                              Collections.emptyList()))));
     topicMetadata.add(new MetadataResponse.TopicMetadata(Errors.NONE,
                                                          TOPIC0 + "1",
                                                          false,
                                                          Collections.singletonList(new MetadataResponse.PartitionMetadata(
-                                                             Errors.NONE, 0, NODE_0,
+                                                             Errors.NONE, tp1, Optional.of(NODE_0.id()),
                                                              Optional.of(RecordBatch.NO_PARTITION_LEADER_EPOCH),
-                                                             Arrays.asList(nodes()), Arrays.asList(nodes()),
+                                                             nodeIds(), nodeIds(),
                                                              Collections.emptyList()))));
 
     MetadataResponse metadataResponse = KafkaCruiseControlUtils.prepareMetadataResponse(cluster.nodes(),
                                                                                         cluster.clusterResource().clusterId(),
                                                                                         MetadataResponse.NO_CONTROLLER_ID,
                                                                                         topicMetadata);
-    metadata.update(KafkaCruiseControlUtils.REQUEST_VERSION_UPDATE, metadataResponse, 1);
-
+    metadata.update(KafkaCruiseControlUtils.REQUEST_VERSION_UPDATE, metadataResponse, false, 1);
 
     Map<PartitionEntity, ValuesAndExtrapolations> aggregateResult =
         metricSampleAggregator.aggregate(cluster, Long.MAX_VALUE, new OperationProgress()).valuesAndExtrapolations();
@@ -183,10 +181,9 @@ public class KafkaPartitionMetricSampleAggregatorTest {
     PartitionEntity pe1 = new PartitionEntity(tp1);
 
     List<MetadataResponse.PartitionMetadata> partitionMetadata =
-        Collections.singletonList(new MetadataResponse.PartitionMetadata(Errors.NONE, 1, NODE_0,
+        Collections.singletonList(new MetadataResponse.PartitionMetadata(Errors.NONE, tp1, Optional.of(NODE_0.id()),
                                                                          Optional.of(RecordBatch.NO_PARTITION_LEADER_EPOCH),
-                                                                         Arrays.asList(nodes()), Arrays.asList(nodes()),
-                                                                         Collections.emptyList()));
+                                                                         nodeIds(), nodeIds(), Collections.emptyList()));
     List<MetadataResponse.TopicMetadata> topicMetadata = Collections.singletonList(
         new MetadataResponse.TopicMetadata(Errors.NONE, TOPIC0, false, partitionMetadata));
 
@@ -194,7 +191,7 @@ public class KafkaPartitionMetricSampleAggregatorTest {
                                                                                         cluster.clusterResource().clusterId(),
                                                                                         MetadataResponse.NO_CONTROLLER_ID,
                                                                                         topicMetadata);
-    metadata.update(KafkaCruiseControlUtils.REQUEST_VERSION_UPDATE, metadataResponse, 1);
+    metadata.update(KafkaCruiseControlUtils.REQUEST_VERSION_UPDATE, metadataResponse, false, 1);
     populateSampleAggregator(NUM_WINDOWS + 1, MIN_SAMPLES_PER_WINDOW, metricSampleAggregator);
     //Populate partition 1 but leave 1 hole at NUM_WINDOWS'th window.
     CruiseControlUnitTestUtils.populateSampleAggregator(NUM_WINDOWS - 2, MIN_SAMPLES_PER_WINDOW,
@@ -270,18 +267,16 @@ public class KafkaPartitionMetricSampleAggregatorTest {
                                                         NUM_WINDOWS + 2, WINDOW_MS,
                                                         KafkaMetricDef.commonMetricDef());
 
-      MetricSampleAggregationResult<String, PartitionEntity> result =
-          metricSampleAggregator.aggregate(metadata.fetch(), NUM_WINDOWS * WINDOW_MS * 2, new OperationProgress());
-      int numWindows = result.valuesAndExtrapolations().get(PE).metricValues().length();
-      assertEquals(NUM_WINDOWS, numWindows);
-      int numExtrapolations = 0;
-      for (Map.Entry<Integer, Extrapolation> entry : result.valuesAndExtrapolations().get(PE).extrapolations().entrySet()) {
-        assertEquals(Extrapolation.AVG_ADJACENT, entry.getValue());
-        numExtrapolations++;
-      }
-      assertEquals(1, numExtrapolations);
-
-
+    MetricSampleAggregationResult<String, PartitionEntity> result =
+        metricSampleAggregator.aggregate(metadata.fetch(), NUM_WINDOWS * WINDOW_MS * 2, new OperationProgress());
+    int numWindows = result.valuesAndExtrapolations().get(PE).metricValues().length();
+    assertEquals(NUM_WINDOWS, numWindows);
+    int numExtrapolations = 0;
+    for (Map.Entry<Integer, Extrapolation> entry : result.valuesAndExtrapolations().get(PE).extrapolations().entrySet()) {
+      assertEquals(Extrapolation.AVG_ADJACENT, entry.getValue());
+      numExtrapolations++;
+    }
+    assertEquals(1, numExtrapolations);
   }
 
   @Test
@@ -296,11 +291,10 @@ public class KafkaPartitionMetricSampleAggregatorTest {
                                                         metricSampleAggregator, PE, 3, WINDOW_MS,
                                                         KafkaMetricDef.commonMetricDef());
 
-
-      MetricSampleAggregationResult<String, PartitionEntity> result =
-          metricSampleAggregator.aggregate(metadata.fetch(), NUM_WINDOWS * WINDOW_MS, new OperationProgress());
-      // Partition "topic-0" is expected to be a valid partition in result, with valid sample values collected for window [1, NUM_WINDOW - 3].
-      assertEquals(NUM_WINDOWS - 3, result.valuesAndExtrapolations().get(PE).windows().size());
+    MetricSampleAggregationResult<String, PartitionEntity> result =
+        metricSampleAggregator.aggregate(metadata.fetch(), NUM_WINDOWS * WINDOW_MS, new OperationProgress());
+    // Partition "topic-0" is expected to be a valid partition in result, with valid sample values collected for window [1, NUM_WINDOW - 3].
+    assertEquals(NUM_WINDOWS - 3, result.valuesAndExtrapolations().get(PE).windows().size());
   }
 
   @Test
@@ -362,8 +356,8 @@ public class KafkaPartitionMetricSampleAggregatorTest {
                              / (resource == Resource.CPU ? UNIT_INTERVAL_TO_PERCENTAGE : 1.0) * metricIds.size();
       assertEquals("The utilization for " + resource + " should be " + expectedValue,
                    expectedValue, partitionValuesAndExtrapolations.metricValues().valuesForGroup(resource.name(),
-                                                                          KafkaMetricDef.commonMetricDef(),
-                                                                          true).get(NUM_WINDOWS - 1), 0.01);
+                                                                                                 KafkaMetricDef.commonMetricDef(),
+                                                                                                 true).get(NUM_WINDOWS - 1), 0.01);
     }
   }
 
@@ -491,6 +485,7 @@ public class KafkaPartitionMetricSampleAggregatorTest {
 
   /**
    * Two topics with 2 partitions each. No data missing.
+   * @return Setup scenario #1
    */
   private TestContext setupScenario1() {
     TopicPartition t0p1 = new TopicPartition(TOPIC0, 1);
@@ -511,6 +506,7 @@ public class KafkaPartitionMetricSampleAggregatorTest {
    * Two topics with 2 partitions each.
    * T1P1 misses window 6000 (index=5), 7000 (index=6) and 20000 (index=19)
    * Other partitions has full data.
+   * @return Setup scenario #2
    */
   private TestContext setupScenario2() {
     TopicPartition t0p1 = new TopicPartition(TOPIC0, 1);
@@ -539,6 +535,7 @@ public class KafkaPartitionMetricSampleAggregatorTest {
    * T0P1 missing window 18000 (index=17), 19000 (index=18)
    * T1P1 missing window 6000 (index=5), 7000 (index=6)
    * Other partitions have all data.
+   * @return Setup scenario #3
    */
   private TestContext setupScenario3() {
     TopicPartition t0p1 = new TopicPartition(TOPIC0, 1);
@@ -574,6 +571,7 @@ public class KafkaPartitionMetricSampleAggregatorTest {
    * T0P1 has all the windows with AVG_AVAILABLE as extrapolations.
    * T1P1 misses window 6000 (index=5), 7000 (index=6)
    * All other partitions have full data.
+   * @return Setup scenario #4
    */
   private TestContext setupScenario4() {
     TopicPartition t0p1 = new TopicPartition(TOPIC0, 1);

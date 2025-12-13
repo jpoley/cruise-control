@@ -11,6 +11,8 @@ import com.linkedin.kafka.cruisecontrol.analyzer.AnalyzerUtils;
 import com.linkedin.kafka.cruisecontrol.analyzer.BalancingConstraint;
 import com.linkedin.kafka.cruisecontrol.analyzer.BalancingAction;
 import com.linkedin.kafka.cruisecontrol.analyzer.ActionType;
+import com.linkedin.kafka.cruisecontrol.analyzer.ProvisionResponse;
+import com.linkedin.kafka.cruisecontrol.analyzer.ProvisionStatus;
 import com.linkedin.kafka.cruisecontrol.config.KafkaCruiseControlConfig;
 import com.linkedin.kafka.cruisecontrol.config.constants.MonitorConfig;
 import com.linkedin.kafka.cruisecontrol.exception.OptimizationFailureException;
@@ -26,8 +28,10 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import java.util.Collection;
 import java.util.Set;
+
 import static com.linkedin.kafka.cruisecontrol.analyzer.ActionAcceptance.ACCEPT;
 import static com.linkedin.kafka.cruisecontrol.analyzer.ActionAcceptance.BROKER_REJECT;
+import static com.linkedin.kafka.cruisecontrol.analyzer.ProvisionStatus.*;
 import static com.linkedin.kafka.cruisecontrol.analyzer.goals.GoalUtils.legitMove;
 import static com.linkedin.kafka.cruisecontrol.analyzer.goals.GoalUtils.legitMoveBetweenDisks;
 import static com.linkedin.kafka.cruisecontrol.analyzer.goals.GoalUtils.eligibleBrokers;
@@ -35,31 +39,43 @@ import static com.linkedin.kafka.cruisecontrol.analyzer.goals.GoalUtils.eligible
 
 
 /**
- * An abstract class for goals. This class will be extended to crete custom goals for different purposes -- e.g.
+ * An abstract class for goals. This class will be extended to create custom goals for different purposes -- e.g.
  * balancing the distribution of replicas or resources in the cluster.
  */
 public abstract class AbstractGoal implements Goal {
   private static final Logger LOG = LoggerFactory.getLogger(AbstractGoal.class);
   protected boolean _finished;
-  protected boolean _succeeded = true;
+  protected boolean _succeeded;
   protected BalancingConstraint _balancingConstraint;
   protected int _numWindows;
   protected double _minMonitoredPartitionPercentage;
+  protected ProvisionResponse _provisionResponse;
 
   /**
-   * Constructor of Abstract Goal class sets the _finished flag to false to signal that the goal requirements have not
-   * been satisfied, yet.
+   * Constructor of Abstract Goal class sets the
+   * <ul>
+   *   <li>{@link #_finished} flag to {@code false} to signal that the goal has not been optimized, yet.</li>
+   *   <li>{@link #_provisionResponse} with {@link ProvisionStatus#UNDECIDED} status to signal that the goal has not identified the
+   *   cluster as under-provisioned, over-provisioned, or right-sized.</li>
+   * </ul>
    */
   public AbstractGoal() {
     _finished = false;
+    _succeeded = true;
+    _provisionResponse = new ProvisionResponse(UNDECIDED);
   }
 
   @Override
   public void configure(Map<String, ?> configs) {
-    KafkaCruiseControlConfig parsedConfig = new KafkaCruiseControlConfig(configs, false);
+    KafkaCruiseControlConfig parsedConfig = new KafkaCruiseControlConfig(configs);
     _balancingConstraint = new BalancingConstraint(parsedConfig);
     _numWindows = parsedConfig.getInt(MonitorConfig.NUM_PARTITION_METRICS_WINDOWS_CONFIG);
     _minMonitoredPartitionPercentage = parsedConfig.getDouble(MonitorConfig.MIN_VALID_PARTITION_RATIO_CONFIG);
+  }
+
+  private static boolean hasExcludedBrokersForReplicaMoveWithReplicas(ClusterModel clusterModel, OptimizationOptions optimizationOptions) {
+    Set<Integer> excludedBrokers = optimizationOptions.excludedBrokersForReplicaMove();
+    return clusterModel.aliveBrokers().stream().anyMatch(broker -> excludedBrokers.contains(broker.id()) && !broker.replicas().isEmpty());
   }
 
   @Override
@@ -67,47 +83,80 @@ public abstract class AbstractGoal implements Goal {
       throws OptimizationFailureException {
     try {
       _succeeded = true;
+      // Resetting the provision response ensures fresh provision response if the same goal is optimized multiple times.
+      _provisionResponse = new ProvisionResponse(UNDECIDED);
       LOG.debug("Starting optimization for {}.", name());
       // Initialize pre-optimized stats.
-      ClusterModelStats statsBeforeOptimization = clusterModel.getClusterStats(_balancingConstraint);
+      ClusterModelStats statsBeforeOptimization = clusterModel.getClusterStats(_balancingConstraint, optimizationOptions);
       LOG.trace("[PRE - {}] {}", name(), statsBeforeOptimization);
       _finished = false;
       long goalStartTime = System.currentTimeMillis();
       initGoalState(clusterModel, optimizationOptions);
       SortedSet<Broker> brokenBrokers = clusterModel.brokenBrokers();
-
+      boolean originallyHasExcludedBrokersForReplicaMoveWithReplicas = hasExcludedBrokersForReplicaMoveWithReplicas(clusterModel,
+                                                                                                                    optimizationOptions);
       while (!_finished) {
         for (Broker broker : brokersToBalance(clusterModel)) {
           rebalanceForBroker(broker, clusterModel, optimizedGoals, optimizationOptions);
         }
         updateGoalState(clusterModel, optimizationOptions);
       }
-      ClusterModelStats statsAfterOptimization = clusterModel.getClusterStats(_balancingConstraint);
+      ClusterModelStats statsAfterOptimization = clusterModel.getClusterStats(_balancingConstraint, optimizationOptions);
       LOG.trace("[POST - {}] {}", name(), statsAfterOptimization);
       if (LOG.isDebugEnabled()) {
         LOG.debug("Finished optimization for {} in {}ms.", name(), System.currentTimeMillis() - goalStartTime);
       }
       LOG.trace("Cluster after optimization is {}", clusterModel);
-      // We only ensure the optimization did not make stats worse when it is not self-healing.
-      if (brokenBrokers.isEmpty()) {
+      // The optimization cannot make stats worse unless the cluster has (1) broken brokers or (2) excluded brokers for replica move with replicas.
+      if (brokenBrokers.isEmpty() && !originallyHasExcludedBrokersForReplicaMoveWithReplicas) {
         ClusterModelStatsComparator comparator = clusterModelStatsComparator();
         // Throw exception when the stats before optimization is preferred.
         if (comparator.compare(statsAfterOptimization, statsBeforeOptimization) < 0) {
-          String mitigation = GoalUtils.mitigationForOptimizationFailures(optimizationOptions);
-          throw new OptimizationFailureException(String.format("Optimization for goal %s failed because the optimized "
-                                                               + "result is worse than before. Detailed reason: %s. %s",
-                                                               name(), comparator.explainLastComparison(), mitigation));
+          // If a goal provides worse stats after optimization, that indicates an implementation error with the goal.
+          throw new IllegalStateException(String.format("Optimization for goal %s failed because the optimized result is worse than before."
+                                                        + " Reason: %s.", name(), comparator.explainLastComparison()));
         }
       }
+      // Ensure that a cluster is not identified as over provisioned unless it has the minimum required number of alive brokers and
+      // expected number of brokers after the provisioning will still be larger than or equal to the max RF
+      _provisionResponse =
+          GoalUtils.validateProvisionResponse(_provisionResponse, clusterModel, _balancingConstraint.overprovisionedMinBrokers());
       return _succeeded;
+    } catch (OptimizationFailureException ofe) {
+      _provisionResponse = new ProvisionResponse(UNDER_PROVISIONED, ofe.provisionRecommendation(), name());
+      // Mitigation (if relevant) is reported as part of exception message to provide helpful tips concerning the used optimizationOptions.
+      String mitigation = GoalUtils.mitigationForOptimizationFailures(optimizationOptions);
+      String message = String.format("%s%s", ofe.getMessage(), mitigation.isEmpty() ? "" : String.format(" || Tips: %s", mitigation));
+      throw new OptimizationFailureException(message, ofe.provisionRecommendation());
     } finally {
       // Clear any sorted replicas tracked in the process of optimization.
       clusterModel.clearSortedReplicas();
     }
   }
 
+  /**
+   * A default implementation
+   * @return Dynamically obtained simple name of the class.  Works even with sub-classing
+   */
   @Override
-  public abstract String name();
+  public String name() {
+    return this.getClass().getSimpleName();
+  }
+
+  @Override
+  public void finish() {
+    _finished = true;
+  }
+
+  @Override
+  public ProvisionStatus provisionStatus() {
+    return provisionResponse().status();
+  }
+
+  @Override
+  public ProvisionResponse provisionResponse() {
+    return _provisionResponse;
+  }
 
   /**
    * Get sorted brokers that the rebalance process will go over to apply balancing actions to replicas they contain.
@@ -116,16 +165,18 @@ public abstract class AbstractGoal implements Goal {
    * @return A collection of brokers that the rebalance process will go over to apply balancing actions to replicas
    * they contain.
    */
-  protected abstract SortedSet<Broker> brokersToBalance(ClusterModel clusterModel);
+  protected SortedSet<Broker> brokersToBalance(ClusterModel clusterModel) {
+    return clusterModel.brokers();
+  }
 
   /**
    * Check if requirements of this goal are not violated if this action is applied to the given cluster state,
-   * false otherwise.
+   * {@code false} otherwise.
    *
    * @param clusterModel The state of the cluster.
    * @param action Action containing information about potential modification to the given cluster model.
-   * @return True if requirements of this goal are not violated if this action is applied to the given cluster state,
-   * false otherwise.
+   * @return {@code true} if requirements of this goal are not violated if this action is applied to the given cluster state,
+   * {@code false} otherwise.
    */
   protected abstract boolean selfSatisfied(ClusterModel clusterModel, BalancingAction action);
 

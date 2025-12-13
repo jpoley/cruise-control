@@ -6,16 +6,16 @@ package com.linkedin.kafka.cruisecontrol.servlet.response;
 
 import com.google.gson.Gson;
 import com.google.gson.GsonBuilder;
+import com.linkedin.cruisecontrol.servlet.parameters.CruiseControlParameters;
 import com.linkedin.kafka.cruisecontrol.analyzer.OptimizerResult;
 import com.linkedin.kafka.cruisecontrol.config.KafkaCruiseControlConfig;
 import com.linkedin.kafka.cruisecontrol.executor.ExecutionProposal;
 import com.linkedin.kafka.cruisecontrol.model.ClusterModelStats;
 import com.linkedin.kafka.cruisecontrol.servlet.CruiseControlEndPoint;
 import com.linkedin.kafka.cruisecontrol.servlet.parameters.AddedOrRemovedBrokerParameters;
-import com.linkedin.cruisecontrol.servlet.parameters.CruiseControlParameters;
 import com.linkedin.kafka.cruisecontrol.servlet.parameters.DemoteBrokerParameters;
 import com.linkedin.kafka.cruisecontrol.servlet.parameters.KafkaOptimizationParameters;
-import com.linkedin.kafka.cruisecontrol.servlet.parameters.TopicConfigurationParameters;
+import com.linkedin.kafka.cruisecontrol.servlet.parameters.RemoveDisksParameters;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
@@ -41,13 +41,13 @@ public class OptimizationResult extends AbstractCruiseControlResponse {
   @JsonResponseField(required = false)
   protected static final String LOAD_BEFORE_OPTIMIZATION = "loadBeforeOptimization";
   protected OptimizerResult _optimizerResult;
-  protected String _cachedJSONResponse;
+  protected String _cachedJsonResponse;
   protected String _cachedPlaintextResponse;
 
   public OptimizationResult(OptimizerResult optimizerResult, KafkaCruiseControlConfig config) {
     super(config);
     _optimizerResult = optimizerResult;
-    _cachedJSONResponse = null;
+    _cachedJsonResponse = null;
     _cachedPlaintextResponse = null;
   }
 
@@ -58,8 +58,8 @@ public class OptimizationResult extends AbstractCruiseControlResponse {
   /**
    * @return JSON response if cached, null otherwise.
    */
-  public String cachedJSONResponse() {
-    return _cachedJSONResponse;
+  public String cachedJsonResponse() {
+    return _cachedJsonResponse;
   }
 
   /**
@@ -86,6 +86,8 @@ public class OptimizationResult extends AbstractCruiseControlResponse {
       case TOPIC_CONFIGURATION:
         return String.format("%n%nCluster load after updating replication factor of topics %s%n",
                              _optimizerResult.topicsWithReplicationFactorChange());
+      case REMOVE_DISKS:
+        return String.format("%n%nCluster load after removing disks %s:%n", ((RemoveDisksParameters) parameters).brokerIdAndLogdirs());
       default:
         LOG.error("Unrecognized endpoint.");
         return "Unrecognized endpoint.";
@@ -110,15 +112,10 @@ public class OptimizationResult extends AbstractCruiseControlResponse {
   @Override
   protected void discardIrrelevantAndCacheRelevant(CruiseControlParameters parameters) {
     // Cache relevant response.
-    boolean isVerbose;
-    if (parameters.endPoint() == CruiseControlEndPoint.TOPIC_CONFIGURATION) {
-      isVerbose = ((TopicConfigurationParameters) parameters).topicReplicationFactorChangeParameters().isVerbose();
-    } else {
-      isVerbose = ((KafkaOptimizationParameters) parameters).isVerbose();
-    }
-    _cachedResponse = parameters.json() ? getJSONString(isVerbose) : getPlaintext(isVerbose, getPlaintextPretext(parameters));
+    boolean isVerbose = ((KafkaOptimizationParameters) parameters).isVerbose();
+    _cachedResponse = parameters.json() ? getJsonString(isVerbose) : getPlaintext(isVerbose, getPlaintextPretext(parameters));
     if (parameters.json()) {
-      _cachedJSONResponse = _cachedResponse;
+      _cachedJsonResponse = _cachedResponse;
     } else {
       _cachedPlaintextResponse = _cachedResponse;
     }
@@ -131,14 +128,14 @@ public class OptimizationResult extends AbstractCruiseControlResponse {
    */
   public void discardIrrelevantAndCacheJsonAndPlaintext() {
     if (_optimizerResult != null) {
-      _cachedJSONResponse = getJSONString(false);
+      _cachedJsonResponse = getJsonString(false);
       _cachedPlaintextResponse = getPlaintext(false, String.format("%n%nCluster load after self-healing:%n"));
       // Discard irrelevant response.
       _optimizerResult = null;
     }
   }
 
-  protected String getJSONString(boolean isVerbose) {
+  protected String getJsonString(boolean isVerbose) {
     Map<String, Object> optimizationResult = new HashMap<>();
     if (isVerbose) {
       optimizationResult.put(PROPOSALS, _optimizerResult.goalProposals().stream()
@@ -163,7 +160,8 @@ public class OptimizationResult extends AbstractCruiseControlResponse {
     sb.append(_optimizerResult.getProposalSummary());
     for (Map.Entry<String, ClusterModelStats> entry : _optimizerResult.statsByGoalName().entrySet()) {
       String goalName = entry.getKey();
-      sb.append(String.format("%n%nStats for %s(%s):%n", goalName, _optimizerResult.goalResultDescription(goalName)));
+      sb.append(String.format("%n%n[%6d ms] Stats for %s(%s):%n", _optimizerResult.optimizationDuration(goalName).toMillis(), goalName,
+                              _optimizerResult.goalResultDescription(goalName)));
       sb.append(entry.getValue().toString());
     }
   }
@@ -176,6 +174,8 @@ public class OptimizationResult extends AbstractCruiseControlResponse {
     protected static final String STATUS = "status";
     @JsonResponseField
     protected static final String CLUSTER_MODEL_STATS = "clusterModelStats";
+    @JsonResponseField
+    protected static final String OPTIMIZATION_TIME_MS = "optimizationTimeMs";
     protected String _goalName;
 
     GoalStatus(String goalName) {
@@ -183,11 +183,9 @@ public class OptimizationResult extends AbstractCruiseControlResponse {
     }
 
     protected Map<String, Object> getJsonStructure() {
-      Map<String, Object> goalMap = new HashMap<>(3);
-      goalMap.put(GOAL, _goalName);
-      goalMap.put(STATUS, _optimizerResult.goalResultDescription(_goalName));
-      goalMap.put(CLUSTER_MODEL_STATS, _optimizerResult.statsByGoalName().get(_goalName).getJsonStructure());
-      return goalMap;
+      return Map.of(GOAL, _goalName, STATUS, _optimizerResult.goalResultDescription(_goalName),
+                    CLUSTER_MODEL_STATS, _optimizerResult.statsByGoalName().get(_goalName).getJsonStructure(),
+                    OPTIMIZATION_TIME_MS, _optimizerResult.optimizationDuration(_goalName).toMillis());
     }
   }
 }

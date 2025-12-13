@@ -17,6 +17,8 @@ import java.util.Map;
 import java.util.Set;
 import java.util.StringJoiner;
 
+import static com.linkedin.cruisecontrol.common.utils.Utils.validateNotNull;
+
 
 /**
  * The aggregated metric values.
@@ -37,9 +39,7 @@ public class AggregatedMetricValues {
    * @param valuesByMetricId the values of the metrics. The key is the metric id.
    */
   public AggregatedMetricValues(Map<Short, MetricValues> valuesByMetricId) {
-    if (valuesByMetricId == null) {
-      throw new IllegalArgumentException("The metric values cannot be null");
-    }
+    validateNotNull(valuesByMetricId, "The metric values cannot be null");
     int length = valuesByMetricId.isEmpty() ? -1 : valuesByMetricId.values().iterator().next().length();
     for (MetricValues values : valuesByMetricId.values()) {
       if (length != values.length()) {
@@ -127,7 +127,7 @@ public class AggregatedMetricValues {
    * Check if the AggregatedMetricValues contains value for any metrics. Note that this call does not verify
    * if the values array for a particular metric is empty or not.
    *
-   * @return True the aggregated metric values is empty, false otherwise.
+   * @return {@code true} the aggregated metric values is empty, {@code false} otherwise.
    */
   public boolean isEmpty() {
     return _metricValues.isEmpty();
@@ -147,9 +147,7 @@ public class AggregatedMetricValues {
    * @param metricValuesToAdd the metric values to add.
    */
   public void add(short metricId, MetricValues metricValuesToAdd) {
-    if (metricValuesToAdd == null) {
-      throw new IllegalArgumentException("The metric values to be added cannot be null");
-    }
+    validateNotNull(metricValuesToAdd, "The metric values to be added cannot be null");
     if (!_metricValues.isEmpty() && metricValuesToAdd.length() != length()) {
       throw new IllegalArgumentException("The existing metric length is " + length() + " which is different from the"
                                              + " metric length of " + metricValuesToAdd.length() + " that is being added.");

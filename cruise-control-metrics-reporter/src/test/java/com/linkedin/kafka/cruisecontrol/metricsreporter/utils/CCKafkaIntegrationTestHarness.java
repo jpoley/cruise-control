@@ -14,7 +14,7 @@ import java.util.StringJoiner;
 import org.apache.kafka.common.security.auth.SecurityProtocol;
 
 
-public abstract class CCKafkaIntegrationTestHarness extends CCAbstractZookeeperTestHarness {
+public abstract class CCKafkaIntegrationTestHarness extends CCAbstractKRaftTestHarness {
   protected Map<Integer, CCEmbeddedBroker> _brokers = null;
   protected String _bootstrapUrl;
 
@@ -34,7 +34,8 @@ public abstract class CCKafkaIntegrationTestHarness extends CCAbstractZookeeperT
       CCEmbeddedBroker broker = new CCEmbeddedBroker(brokerConfig);
       int id = broker.id();
       if (_brokers.putIfAbsent(id, broker) != null) {
-        CCKafkaTestUtils.quietly(broker::close); //wont be picked up by teardown
+        // Will not be picked up by teardown
+        CCKafkaTestUtils.quietly(broker::close);
         throw new IllegalStateException("multiple brokers defined with id " + id);
       }
     }
@@ -83,26 +84,33 @@ public abstract class CCKafkaIntegrationTestHarness extends CCAbstractZookeeperT
   protected List<Map<Object, Object>> buildBrokerConfigs() {
     List<Map<Object, Object>> configs = new ArrayList<>();
     for (int i = 0; i < clusterSize(); i++) {
-      CCEmbeddedBrokerBuilder builder = new CCEmbeddedBrokerBuilder();
-      builder.zkConnect(zookeeper());
-      builder.nodeId(i);
-      builder.enable(securityProtocol());
-      if (securityProtocol() == SecurityProtocol.SSL) {
-        if (trustStoreFile() != null) {
-          builder.trustStore(trustStoreFile());
-        }
-      } else {
-        if (trustStoreFile() != null) {
-          throw new AssertionError("security protocol not set yet trust store file provided");
-        }
-      }
-      Map<Object, Object> config = builder.buildConfig();
-      config.putAll(overridingProps());
-      configs.add(config);
+      configs.add(createBrokerConfig(i));
     }
     return configs;
   }
 
+  protected Map<Object, Object> createBrokerConfig(int brokerId) {
+    CCEmbeddedBrokerBuilder builder = new CCEmbeddedBrokerBuilder();
+    if (_controller != null) {
+      builder.kraftConnect(kraftController());
+      builder.clusterId(kraftController());
+    }
+    builder.nodeId(brokerId);
+    builder.enable(securityProtocol());
+    if (securityProtocol() == SecurityProtocol.SSL) {
+      if (trustStoreFile() != null) {
+        builder.trustStore(trustStoreFile());
+      }
+    } else {
+      if (trustStoreFile() != null) {
+        throw new AssertionError("security protocol not set yet trust store file provided");
+      }
+    }
+    Map<Object, Object> config = builder.buildConfig();
+    config.putAll(overridingProps());
+    return config;
+  }
+  
   protected SecurityProtocol securityProtocol() {
     return SecurityProtocol.PLAINTEXT;
   }

@@ -6,6 +6,7 @@ package com.linkedin.kafka.cruisecontrol.executor;
 
 import com.linkedin.kafka.cruisecontrol.servlet.response.JsonResponseField;
 import com.linkedin.kafka.cruisecontrol.servlet.response.JsonResponseClass;
+import java.util.Arrays;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.HashSet;
@@ -83,7 +84,7 @@ public class ExecutionProposal {
     }
   }
 
-  private boolean brokerOrderMatched(Node[] currentOrderedReplicas, List<ReplicaPlacementInfo> replicas) {
+  private static boolean brokerOrderMatched(Node[] currentOrderedReplicas, List<ReplicaPlacementInfo> replicas) {
     if (replicas.size() != currentOrderedReplicas.length) {
       return false;
     }
@@ -97,15 +98,27 @@ public class ExecutionProposal {
   }
 
   /**
+   * Package private for unit test.
+   * Check whether all replicas of the given partition state are in-sync. This check is resilient against partitions with
+   * {@code ISR set > replica set}. Hence, even if the given partition has extra broker ids in the in-sync replica set, as long as all the
+   * replicas of the partition are in the in-sync replica set, this function will return {@code true}.
+   *
+   * @param partitionInfo Current partition state.
+   * @return {@code true} if all replicas of the given partition state are in-sync, {@code false} otherwise.
+   */
+  static boolean areAllReplicasInSync(PartitionInfo partitionInfo) {
+    return Arrays.asList(partitionInfo.inSyncReplicas()).containsAll(Arrays.asList(partitionInfo.replicas()));
+  }
+
+  /**
    * Check whether the successful completion of inter-broker replica movement from this proposal is reflected in the current
    * ordered replicas in the given cluster and all replicas are in-sync.
    *
    * @param partitionInfo Current partition state.
-   * @return True if successfully completed, false otherwise.
+   * @return {@code true} if successfully completed, {@code false} otherwise.
    */
   public boolean isInterBrokerMovementCompleted(PartitionInfo partitionInfo) {
-    return brokerOrderMatched(partitionInfo.replicas(), _newReplicas)
-           && partitionInfo.replicas().length == partitionInfo.inSyncReplicas().length;
+    return brokerOrderMatched(partitionInfo.replicas(), _newReplicas) && areAllReplicasInSync(partitionInfo);
   }
 
   /**
@@ -115,7 +128,7 @@ public class ExecutionProposal {
    * In that case, we treat it as aborted as well.
    *
    * @param partitionInfo Current partition state.
-   * @return True if aborted, false otherwise.
+   * @return {@code true} if aborted, {@code false} otherwise.
    */
   public boolean isInterBrokerMovementAborted(PartitionInfo partitionInfo) {
     return isInterBrokerMovementCompleted(partitionInfo)
@@ -161,28 +174,28 @@ public class ExecutionProposal {
    * @return The replica list of the partition before executing the proposal.
    */
   public List<ReplicaPlacementInfo> oldReplicas() {
-    return _oldReplicas;
+    return Collections.unmodifiableList(_oldReplicas);
   }
 
   /**
    * @return The new replica list fo the partition after executing the proposal.
    */
   public List<ReplicaPlacementInfo> newReplicas() {
-    return _newReplicas;
+    return Collections.unmodifiableList(_newReplicas);
   }
 
   /**
    * @return The replicas that exist in new replica list but not in old replica list.
    */
   public Set<ReplicaPlacementInfo> replicasToAdd() {
-    return _replicasToAdd;
+    return Collections.unmodifiableSet(_replicasToAdd);
   }
 
   /**
    * @return The replicas that exist in old replica list but not in the new replica list.
    */
   public Set<ReplicaPlacementInfo> replicasToRemove() {
-    return _replicasToRemove;
+    return Collections.unmodifiableSet(_replicasToRemove);
   }
 
   /**
@@ -190,7 +203,7 @@ public class ExecutionProposal {
    *         which means an intra-broker replica movement for is needed for these replicas.
    */
   public Map<Integer, ReplicaPlacementInfo> replicasToMoveBetweenDisksByBroker() {
-    return _replicasToMoveBetweenDisksByBroker;
+    return Collections.unmodifiableMap(_replicasToMoveBetweenDisksByBroker);
   }
 
   /**
@@ -204,7 +217,7 @@ public class ExecutionProposal {
    * @return whether the proposal involves a leader action. i.e. leader movement.
    */
   public boolean hasLeaderAction() {
-    return _oldLeader != _newReplicas.get(0);
+    return !_oldLeader.equals(_newReplicas.get(0));
   }
 
   /**
@@ -220,7 +233,7 @@ public class ExecutionProposal {
    *         always the size of the replica since one broker can only host one replica of the topic partition.
    */
   public long intraBrokerDataToMoveInMB() {
-    return  _partitionSize;
+    return _partitionSize;
   }
 
   /**
@@ -251,14 +264,9 @@ public class ExecutionProposal {
    * @return An object that can be further used to encode into JSON.
    */
   public Map<String, Object> getJsonStructure() {
-    Map<String, Object> proposalMap = new HashMap<>(4);
-    proposalMap.put(TOPIC_PARTITION, _tp);
-    proposalMap.put(OLD_LEADER, _oldLeader.brokerId());
-    proposalMap.put(OLD_REPLICAS,
-                    _oldReplicas.stream().mapToInt(ReplicaPlacementInfo::brokerId).boxed().collect(Collectors.toList()));
-    proposalMap.put(NEW_REPLICAS,
-                    _newReplicas.stream().mapToInt(ReplicaPlacementInfo::brokerId).boxed().collect(Collectors.toList()));
-    return proposalMap;
+    return Map.of(TOPIC_PARTITION, _tp, OLD_LEADER, _oldLeader.brokerId(),
+                  OLD_REPLICAS, _oldReplicas.stream().mapToInt(ReplicaPlacementInfo::brokerId).boxed().collect(Collectors.toList()),
+                  NEW_REPLICAS, _newReplicas.stream().mapToInt(ReplicaPlacementInfo::brokerId).boxed().collect(Collectors.toList()));
   }
 
   @Override

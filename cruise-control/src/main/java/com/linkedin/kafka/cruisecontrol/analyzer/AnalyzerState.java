@@ -9,6 +9,7 @@ import com.linkedin.kafka.cruisecontrol.analyzer.goals.Goal;
 import com.linkedin.kafka.cruisecontrol.servlet.response.JsonResponseClass;
 import com.linkedin.kafka.cruisecontrol.servlet.response.JsonResponseField;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
@@ -33,7 +34,7 @@ public class AnalyzerState {
   private final Map<Goal, Boolean> _readyGoals;
 
   /**
-   * @param isProposalReady True if the goal optimizer has valid cached proposals for optimization with the default goals.
+   * @param isProposalReady {@code true} if the goal optimizer has valid cached proposals for optimization with the default goals.
    * @param readyGoals Goals that are ready for self-healing.
    */
   public AnalyzerState(boolean isProposalReady, Map<Goal, Boolean> readyGoals) {
@@ -42,7 +43,7 @@ public class AnalyzerState {
   }
 
   /**
-   * @return True if the proposal is ready, false otherwise.
+   * @return {@code true} if the proposal is ready, {@code false} otherwise.
    */
   public boolean proposalReady() {
     return _isProposalReady;
@@ -52,15 +53,15 @@ public class AnalyzerState {
    * @return A map of ready goals.
    */
   public Map<Goal, Boolean> readyGoals() {
-    return _readyGoals;
+    return Collections.unmodifiableMap(_readyGoals);
   }
 
   /**
-   * @param verbose True if verbose, false otherwise.
+   * @param verbose {@code true} if verbose, {@code false} otherwise.
    * @return An object that can be further used to encode into JSON.
    */
   public Map<String, Object> getJsonStructure(boolean verbose) {
-    Map<String, Object> analyzerState = new HashMap<>(verbose ? 3 : 2);
+    Map<String, Object> analyzerState = new HashMap<>();
     Set<String> readyGoalNames = new HashSet<>();
     for (Map.Entry<Goal, Boolean> entry : _readyGoals.entrySet()) {
       if (entry.getValue()) {
@@ -75,7 +76,7 @@ public class AnalyzerState {
         Goal goal = entry.getKey();
         String goalReadyStatus = entry.getValue() ? READY : NOT_READY;
         GoalReadinessRecord goalReadinessRecord = new GoalReadinessRecord(goal, goalReadyStatus);
-        goalReadinessList.add(goalReadinessRecord);
+        goalReadinessList.add(goalReadinessRecord.getJsonStructure());
       }
       analyzerState.put(GOAL_READINESS, goalReadinessList);
     }

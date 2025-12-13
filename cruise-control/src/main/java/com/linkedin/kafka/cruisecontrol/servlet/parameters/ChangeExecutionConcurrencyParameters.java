@@ -4,6 +4,7 @@
 
 package com.linkedin.kafka.cruisecontrol.servlet.parameters;
 
+import com.linkedin.kafka.cruisecontrol.executor.ConcurrencyType;
 import com.linkedin.kafka.cruisecontrol.servlet.CruiseControlEndPoint;
 import java.io.UnsupportedEncodingException;
 import java.util.Collections;
@@ -15,13 +16,15 @@ import static com.linkedin.kafka.cruisecontrol.servlet.parameters.ParameterUtils
 import static com.linkedin.kafka.cruisecontrol.servlet.parameters.ParameterUtils.CONCURRENT_PARTITION_MOVEMENTS_PER_BROKER_PARAM;
 import static com.linkedin.kafka.cruisecontrol.servlet.parameters.ParameterUtils.CONCURRENT_INTRA_BROKER_PARTITION_MOVEMENTS_PARAM;
 import static com.linkedin.kafka.cruisecontrol.servlet.parameters.ParameterUtils.CONCURRENT_LEADER_MOVEMENTS_PARAM;
+import static com.linkedin.kafka.cruisecontrol.servlet.parameters.ParameterUtils.BROKER_CONCURRENT_LEADER_MOVEMENTS_PARAM;
+import static com.linkedin.kafka.cruisecontrol.servlet.parameters.ParameterUtils.MAX_PARTITION_MOVEMENTS_IN_CLUSTER_PARAM;
 
 
 /**
  * Optional Parameters for {@link CruiseControlEndPoint#ADMIN}.
  * This class holds all the request parameters for {@link AdminParameters.AdminType#CHANGE_CONCURRENCY}.
  */
-public class ChangeExecutionConcurrencyParameters  extends AbstractParameters {
+public class ChangeExecutionConcurrencyParameters extends AbstractParameters {
   protected static final SortedSet<String> CASE_INSENSITIVE_PARAMETER_NAMES;
   static {
     SortedSet<String> validParameterNames = new TreeSet<>(String.CASE_INSENSITIVE_ORDER);
@@ -29,13 +32,17 @@ public class ChangeExecutionConcurrencyParameters  extends AbstractParameters {
     validParameterNames.add(CONCURRENT_PARTITION_MOVEMENTS_PER_BROKER_PARAM);
     validParameterNames.add(CONCURRENT_INTRA_BROKER_PARTITION_MOVEMENTS_PARAM);
     validParameterNames.add(CONCURRENT_LEADER_MOVEMENTS_PARAM);
+    validParameterNames.add(BROKER_CONCURRENT_LEADER_MOVEMENTS_PARAM);
+    validParameterNames.add(MAX_PARTITION_MOVEMENTS_IN_CLUSTER_PARAM);
     validParameterNames.addAll(AbstractParameters.CASE_INSENSITIVE_PARAMETER_NAMES);
     CASE_INSENSITIVE_PARAMETER_NAMES = Collections.unmodifiableSortedSet(validParameterNames);
   }
   protected Long _executionProgressCheckIntervalMs;
   protected Integer _concurrentInterBrokerPartitionMovements;
   protected Integer _concurrentIntraBrokerPartitionMovements;
-  protected Integer _concurrentLeaderMovements;
+  protected Integer _clusterLeaderMovementConcurrency;
+  protected Integer _brokerLeaderMovementConcurrency;
+  protected Integer _maxInterBrokerPartitionMovements;
 
   protected ChangeExecutionConcurrencyParameters() {
     super();
@@ -44,10 +51,12 @@ public class ChangeExecutionConcurrencyParameters  extends AbstractParameters {
   @Override
   protected void initParameters() throws UnsupportedEncodingException {
     super.initParameters();
-    _executionProgressCheckIntervalMs = ParameterUtils.executionProgressCheckIntervalMs(_request);
-    _concurrentInterBrokerPartitionMovements = ParameterUtils.concurrentMovements(_request, true, false);
-    _concurrentIntraBrokerPartitionMovements = ParameterUtils.concurrentMovements(_request, false, true);
-    _concurrentLeaderMovements = ParameterUtils.concurrentMovements(_request, false, false);
+    _executionProgressCheckIntervalMs = ParameterUtils.executionProgressCheckIntervalMs(_requestContext);
+    _concurrentInterBrokerPartitionMovements = ParameterUtils.concurrentMovements(_requestContext, ConcurrencyType.INTER_BROKER_REPLICA);
+    _concurrentIntraBrokerPartitionMovements = ParameterUtils.concurrentMovements(_requestContext, ConcurrencyType.INTRA_BROKER_REPLICA);
+    _clusterLeaderMovementConcurrency = ParameterUtils.concurrentMovements(_requestContext, ConcurrencyType.LEADERSHIP_CLUSTER);
+    _brokerLeaderMovementConcurrency = ParameterUtils.concurrentMovements(_requestContext, ConcurrencyType.LEADERSHIP_BROKER);
+    _maxInterBrokerPartitionMovements = ParameterUtils.maxPartitionMovements(_requestContext);
   }
 
   /**
@@ -65,7 +74,9 @@ public class ChangeExecutionConcurrencyParameters  extends AbstractParameters {
     if (changeExecutionConcurrencyParameters.executionProgressCheckIntervalMs() == null
         && changeExecutionConcurrencyParameters.concurrentInterBrokerPartitionMovements() == null
         && changeExecutionConcurrencyParameters.concurrentIntraBrokerPartitionMovements() == null
-        && changeExecutionConcurrencyParameters.concurrentLeaderMovements() == null) {
+        && changeExecutionConcurrencyParameters.clusterLeaderMovementConcurrency() == null
+        && changeExecutionConcurrencyParameters.brokerLeaderMovementConcurrency() == null
+        && changeExecutionConcurrencyParameters.maxInterBrokerPartitionMovements() == null) {
       return null;
     }
     return changeExecutionConcurrencyParameters;
@@ -83,8 +94,16 @@ public class ChangeExecutionConcurrencyParameters  extends AbstractParameters {
     return _concurrentIntraBrokerPartitionMovements;
   }
 
-  public Integer concurrentLeaderMovements() {
-    return _concurrentLeaderMovements;
+  public Integer clusterLeaderMovementConcurrency() {
+    return _clusterLeaderMovementConcurrency;
+  }
+
+  public Integer brokerLeaderMovementConcurrency() {
+    return _brokerLeaderMovementConcurrency;
+  }
+
+  public Integer maxInterBrokerPartitionMovements() {
+    return _maxInterBrokerPartitionMovements;
   }
 
   @Override

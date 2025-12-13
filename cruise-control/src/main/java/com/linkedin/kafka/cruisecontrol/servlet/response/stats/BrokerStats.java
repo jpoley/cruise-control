@@ -35,9 +35,10 @@ public class BrokerStats extends AbstractCruiseControlResponse {
   protected final List<SingleBrokerStats> _brokerStats;
   protected final SortedMap<String, SingleHostStats> _hostStats;
   protected int _hostFieldLength;
+  protected int _rackFieldLength;
   protected int _logdirFieldLength;
   protected String _cachedPlainTextResponse;
-  protected String _cachedJSONResponse;
+  protected String _cachedJsonResponse;
   protected boolean _isBrokerStatsEstimated;
 
   public BrokerStats(KafkaCruiseControlConfig config) {
@@ -45,47 +46,32 @@ public class BrokerStats extends AbstractCruiseControlResponse {
     _brokerStats = new ArrayList<>();
     _hostStats = new ConcurrentSkipListMap<>();
     _hostFieldLength = 0;
+    _rackFieldLength = 10;
     _logdirFieldLength = 1;
     _cachedPlainTextResponse = null;
-    _cachedJSONResponse = null;
+    _cachedJsonResponse = null;
     _isBrokerStatsEstimated = false;
   }
 
   /**
    * Add single broker stats.
    *
-   * @param host Host name.
-   * @param id Broker id.
-   * @param state Broker state.
-   * @param diskUtil Disk utilization.
-   * @param cpuUtil CPU utilization.
-   * @param leaderBytesInRate Leader bytes in rate.
-   * @param followerBytesInRate Follower bytes in rate.
-   * @param bytesOutRate Bytes out rate.
+   * @param broker The broker whose stats are requested.
    * @param potentialBytesOutRate Potential bytes out rate.
-   * @param numReplicas Number of replicas.
-   * @param numLeaders Number of leaders.
-   * @param isEstimated True if the broker capacity is estimated, false otherwise.
-   * @param diskCapacity The disk capacity of broker.
-   * @param diskStatsByLogdir Disk stats by logdir.
+   * @param isEstimated {@code true} if the broker capacity is estimated, {@code false} otherwise.
    */
-  public void addSingleBrokerStats(String host, int id, Broker.State state, double diskUtil, double cpuUtil, double leaderBytesInRate,
-                                   double followerBytesInRate, double bytesOutRate, double potentialBytesOutRate,
-                                   int numReplicas, int numLeaders, boolean isEstimated, double diskCapacity,
-                                   Map<String, DiskStats> diskStatsByLogdir) {
-
-    SingleBrokerStats singleBrokerStats =
-        new SingleBrokerStats(host, id, state, diskUtil, cpuUtil, leaderBytesInRate, followerBytesInRate, bytesOutRate,
-                              potentialBytesOutRate, numReplicas, numLeaders, isEstimated, diskCapacity, diskStatsByLogdir);
+  public void addSingleBrokerStats(Broker broker, double potentialBytesOutRate, boolean isEstimated) {
+    String host = broker.host().name();
+    String rack = broker.rack().id();
+    SingleBrokerStats singleBrokerStats = new SingleBrokerStats(broker, potentialBytesOutRate, isEstimated);
     _brokerStats.add(singleBrokerStats);
     _hostFieldLength = Math.max(_hostFieldLength, host.length());
+    _rackFieldLength = Math.max(_rackFieldLength, rack.length());
     // Calculate field length to print logdir name in plaintext response, a padding of 10 is added for this field.
     // If there is no logdir information, this field will be of length of 1.
     _logdirFieldLength = Math.max(_logdirFieldLength,
-                                  diskStatsByLogdir.keySet().stream().mapToInt(String::length).max().orElse(-10) + 10);
-    _hostStats.computeIfAbsent(host, h -> new SingleHostStats(host, 0.0, 0.0, 0.0, 0.0,
-                                                              0.0, 0.0, 0, 0, 0.0))
-              .addBasicStats(singleBrokerStats);
+                                  broker.diskStats().keySet().stream().mapToInt(String::length).max().orElse(-10) + 10);
+    _hostStats.computeIfAbsent(host, h -> new SingleHostStats(host, rack)).addBasicStats(singleBrokerStats);
     _isBrokerStatsEstimated = _isBrokerStatsEstimated || isEstimated;
   }
 
@@ -93,7 +79,7 @@ public class BrokerStats extends AbstractCruiseControlResponse {
     return _isBrokerStatsEstimated;
   }
 
-  protected String getJSONString() {
+  protected String getJsonString() {
     Gson gson = new Gson();
     Map<String, Object> jsonStructure = getJsonStructure();
     jsonStructure.put(VERSION, JSON_VERSION);
@@ -108,18 +94,18 @@ public class BrokerStats extends AbstractCruiseControlResponse {
 
     // host level statistics
     for (Map.Entry<String, SingleHostStats> entry : _hostStats.entrySet()) {
-      hostStats.add(entry.getValue().getJSONStructure());
+      hostStats.add(entry.getValue().getJsonStructure());
     }
 
     // broker level statistics
     List<Map<String, Object>> brokerStats = new ArrayList<>(_brokerStats.size());
     for (SingleBrokerStats stats : _brokerStats) {
-      Map<String, Object> brokerEntry = stats.getJSONStructure();
+      Map<String, Object> brokerEntry = stats.getJsonStructure();
       brokerStats.add(brokerEntry);
     }
 
     // consolidated
-    Map<String, Object> stats = new HashMap<>(2);
+    Map<String, Object> stats = new HashMap<>();
     stats.put(HOSTS, hostStats);
     stats.put(BROKERS, brokerStats);
     return stats;
@@ -128,7 +114,7 @@ public class BrokerStats extends AbstractCruiseControlResponse {
   @Override
   protected void discardIrrelevantAndCacheRelevant(CruiseControlParameters parameters) {
     // Cache relevant response.
-    _cachedJSONResponse = getJSONString();
+    _cachedJsonResponse = getJsonString();
     _cachedPlainTextResponse = toString();
     // Discard irrelevant response.
     _brokerStats.clear();
@@ -137,35 +123,47 @@ public class BrokerStats extends AbstractCruiseControlResponse {
 
   @Override
   public void discardIrrelevantResponse(CruiseControlParameters parameters) {
-    if (_cachedJSONResponse == null || _cachedPlainTextResponse == null) {
+    if (_cachedJsonResponse == null || _cachedPlainTextResponse == null) {
       discardIrrelevantAndCacheRelevant(parameters);
-      if (_cachedJSONResponse == null || _cachedPlainTextResponse == null) {
+      if (_cachedJsonResponse == null || _cachedPlainTextResponse == null) {
         throw new IllegalStateException("Failed to cache the relevant response.");
       }
     }
-    _cachedResponse = parameters.json() ? _cachedJSONResponse : _cachedPlainTextResponse;
+    _cachedResponse = parameters.json() ? _cachedJsonResponse : _cachedPlainTextResponse;
   }
 
   @Override
   public String toString() {
+    if (_brokerStats.isEmpty()) {
+      return "No broker stats found.";
+    }
+
     StringBuilder sb = new StringBuilder();
     boolean hasDiskInfo = !_brokerStats.get(0).diskStatsByLogdir().isEmpty();
 
     // put broker stats.
-    sb.append(String.format("%n%n%" + _hostFieldLength + "s%15s%" + _logdirFieldLength + "s%26s%15s%25s%25s%20s%20s%20s%n",
-                            "HOST", "BROKER", hasDiskInfo ? "LOGDIR" : "", "DISK(MB)/_(%)_", "CPU(%)", "LEADER_NW_IN(KB/s)",
-                            "FOLLOWER_NW_IN(KB/s)", "NW_OUT(KB/s)", "PNW_OUT(KB/s)", "LEADERS/REPLICAS"));
+    sb.append(String.format("%n%n%" + _hostFieldLength + "s%15s%" + _rackFieldLength + "s%" + _logdirFieldLength
+                            + "s%20s%26s%20s%15s%25s%25s%25s%25s%20s%20s%20s%n",
+                            "HOST", "BROKER", "RACK", hasDiskInfo ? "LOGDIR" : "", "DISK_CAP(MB)", "DISK(MB)/_(%)_", "CORE_NUM", "CPU(%)",
+                            "NW_IN_CAP(KB/s)", "LEADER_NW_IN(KB/s)", "FOLLOWER_NW_IN(KB/s)", "NW_OUT_CAP(KB/s)", "NW_OUT(KB/s)",
+                            "PNW_OUT(KB/s)", "LEADERS/REPLICAS"));
     for (SingleBrokerStats stats : _brokerStats) {
-      sb.append(String.format("%" + _hostFieldLength + "s,%14d,%" + _logdirFieldLength
-                              + "s%19.3f/%05.2f,%14.3f,%24.3f,%24.3f,%19.3f,%19.3f,%14d/%d%n",
+      sb.append(String.format("%" + _hostFieldLength + "s,%14d,%" + (_rackFieldLength - 1) + "s,%" + _logdirFieldLength
+                              + "s%19.3f,%19.3f/%05.2f," + coreNumStringFormatter(stats.numCore())
+                              + ",%14.3f,%24.3f,%24.3f,%24.3f,%24.3f,%19.3f,%19.3f,%14d/%d%n",
                               stats.host(),
                               stats.id(),
+                              stats.rack(),
                               "",
+                              stats.diskCapacity(),
                               stats.diskUtil(),
                               stats.diskUtilPct(),
+                              stats.numCore(),
                               stats.cpuUtil(),
+                              stats.networkInCapacity(),
                               stats.leaderBytesInRate(),
                               stats.followerBytesInRate(),
+                              stats.networkOutCapacity(),
                               stats.bytesOutRate(),
                               stats.potentialBytesOutRate(),
                               stats.numLeaders(),
@@ -176,7 +174,7 @@ public class BrokerStats extends AbstractCruiseControlResponse {
         for (Map.Entry<String, DiskStats> entry : capacityByDisk.entrySet()) {
           DiskStats diskStats = entry.getValue();
           Double util = diskStats.utilization();
-          sb.append(String.format("%" + (_hostFieldLength + 15 + _logdirFieldLength) + "s,"
+          sb.append(String.format("%" + (_hostFieldLength + 15 + _rackFieldLength + _logdirFieldLength) + "s,"
                                   + (util == null ? "%19s/%5s," : "%19.3f/%05.2f,") + "%119d/%d%n",
                                   entry.getKey(),
                                   util == null ? "DEAD" : util,
@@ -187,5 +185,14 @@ public class BrokerStats extends AbstractCruiseControlResponse {
       }
     }
     return sb.toString();
+  }
+
+  /**
+   * Format the double type CORE_NUM to int if it is not a fractional value, otherwise format it to double with 2 digits after decimal point
+   * @param numCores the number of cores
+   * @return StringFormatter String for the CORE_NUM
+   */
+  private static String coreNumStringFormatter(double numCores) {
+    return (numCores % 1) == 0 ? "%19.0f" : "%19.2f";
   }
 }

@@ -6,6 +6,7 @@ package com.linkedin.kafka.cruisecontrol.detector;
 
 import com.linkedin.cruisecontrol.detector.AnomalyType;
 import com.linkedin.kafka.cruisecontrol.KafkaCruiseControl;
+import com.linkedin.kafka.cruisecontrol.analyzer.ProvisionResponse;
 import com.linkedin.kafka.cruisecontrol.config.KafkaCruiseControlConfig;
 import com.linkedin.kafka.cruisecontrol.exception.KafkaCruiseControlException;
 import com.linkedin.kafka.cruisecontrol.servlet.handler.async.runnable.RebalanceRunnable;
@@ -16,6 +17,7 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.StringJoiner;
+import java.util.function.Supplier;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -32,11 +34,14 @@ import static com.linkedin.kafka.cruisecontrol.detector.notifier.KafkaAnomalyTyp
  */
 public class GoalViolations extends KafkaAnomaly {
   private static final Logger LOG = LoggerFactory.getLogger(GoalViolations.class);
+  public static final String UNFIXABLE_GOAL_VIOLATIONS = "Unfixable goal violations";
+  public static final String FIXABLE_GOAL_VIOLATIONS = "Fixable goal violations";
   // The priority order of goals is maintained here.
   protected Map<Boolean, List<String>> _violatedGoalsByFixability;
   protected boolean _excludeRecentlyDemotedBrokers;
   protected boolean _excludeRecentlyRemovedBrokers;
   protected RebalanceRunnable _rebalanceRunnable;
+  protected ProvisionResponse _provisionResponse;
 
   /**
    * An anomaly to indicate goal violation(s).
@@ -55,10 +60,24 @@ public class GoalViolations extends KafkaAnomaly {
   }
 
   /**
+   * @param provisionResponse Aggregated provision response corresponding to this goal violation.
+   */
+  public void setProvisionResponse(ProvisionResponse provisionResponse) {
+    _provisionResponse = provisionResponse;
+  }
+
+  /**
+   * @return Aggregated provision response corresponding to this goal violation.
+   */
+  public ProvisionResponse provisionResponse() {
+    return _provisionResponse;
+  }
+
+  /**
    * @return All the goal violations.
    */
   public Map<Boolean, List<String>> violatedGoalsByFixability() {
-    return _violatedGoalsByFixability;
+    return Collections.unmodifiableMap(_violatedGoalsByFixability);
   }
 
   @Override
@@ -67,7 +86,7 @@ public class GoalViolations extends KafkaAnomaly {
     if (_violatedGoalsByFixability.get(false) == null) {
       try {
         // Fix the fixable goal violations with rebalance operation.
-        _optimizationResult = new OptimizationResult(_rebalanceRunnable.rebalance(), null);
+        _optimizationResult = new OptimizationResult(_rebalanceRunnable.computeResult(), null);
         hasProposalsToFix = hasProposalsToFix();
         // Ensure that only the relevant response is cached to avoid memory pressure.
         _optimizationResult.discardIrrelevantAndCacheJsonAndPlaintext();
@@ -86,18 +105,24 @@ public class GoalViolations extends KafkaAnomaly {
   }
 
   @Override
+  public Supplier<String> reasonSupplier() {
+    return () -> String.format("Self healing for %s: %s", GOAL_VIOLATION, this);
+  }
+
+  @Override
   public String toString() {
     StringBuilder sb = new StringBuilder();
-    sb.append("{Unfixable goal violations: {");
+    sb.append(String.format("{%s: {", UNFIXABLE_GOAL_VIOLATIONS));
     StringJoiner joiner = new StringJoiner(",");
     _violatedGoalsByFixability.getOrDefault(false, Collections.emptyList()).forEach(joiner::add);
-    sb.append(joiner.toString());
-    sb.append("}, Fixable goal violations: {");
+    sb.append(joiner);
+    sb.append(String.format("}, %s: {", FIXABLE_GOAL_VIOLATIONS));
     joiner = new StringJoiner(",");
     _violatedGoalsByFixability.getOrDefault(true, Collections.emptyList()).forEach(joiner::add);
-    sb.append(joiner.toString());
-    sb.append(String.format("}, Exclude brokers recently (removed: %s demoted: %s)}",
-                            _excludeRecentlyRemovedBrokers, _excludeRecentlyDemotedBrokers));
+    sb.append(joiner);
+    sb.append(String.format("}, Exclude brokers recently (removed: %s demoted: %s)%s}",
+                            _excludeRecentlyRemovedBrokers, _excludeRecentlyDemotedBrokers,
+                            _provisionResponse == null ? "" : String.format(", Provision: %s", _provisionResponse)));
     return sb.toString();
   }
 
@@ -117,6 +142,7 @@ public class GoalViolations extends KafkaAnomaly {
                                                _excludeRecentlyDemotedBrokers,
                                                _excludeRecentlyRemovedBrokers,
                                                _anomalyId.toString(),
-                                                String.format("Self healing for %s: %s", GOAL_VIOLATION, this));
+                                               reasonSupplier(),
+                                               stopOngoingExecution());
   }
 }

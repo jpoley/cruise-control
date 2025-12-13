@@ -9,13 +9,10 @@ import com.linkedin.cruisecontrol.metricdef.MetricInfo;
 import com.linkedin.cruisecontrol.monitor.sampling.aggregator.AggregatedMetricValues;
 import com.linkedin.cruisecontrol.monitor.sampling.aggregator.MetricValues;
 import com.linkedin.kafka.cruisecontrol.common.Resource;
-
 import com.linkedin.kafka.cruisecontrol.monitor.metricdefinition.KafkaMetricDef;
 import java.io.IOException;
 import java.io.OutputStream;
-
 import java.io.Serializable;
-
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.HashMap;
@@ -77,8 +74,8 @@ public class Load implements Serializable {
    * </ol>
    *
    * @param resource Resource for which the expected utilization will be provided.
-   * @param wantMaxLoad True if the requested utilization represents the peak load, false otherwise.
-   * @param wantAvgLoad True if the requested utilization represents the avg load, false otherwise.
+   * @param wantMaxLoad {@code true} if the requested utilization represents the peak load, {@code false} otherwise.
+   * @param wantAvgLoad {@code true} if the requested utilization represents the avg load, {@code false} otherwise.
    * @return A single representative utilization value on a resource.
    */
   public double expectedUtilizationFor(Resource resource, boolean wantMaxLoad, boolean wantAvgLoad) {
@@ -98,7 +95,7 @@ public class Load implements Serializable {
   }
 
   public double expectedUtilizationFor(Resource resource) {
-    return expectedUtilizationFor(resource, _metricValues, false);
+    return ModelUtils.expectedUtilizationFor(resource, _metricValues);
   }
 
   /**
@@ -111,8 +108,8 @@ public class Load implements Serializable {
    * </ol>
    *
    * @param metric KafkaMetric type for which the expected utilization will be provided.
-   * @param wantMaxLoad True if the requested utilization represents the peak load, false otherwise.
-   * @param wantAvgLoad True if the requested utilization represents the avg load, false otherwise.
+   * @param wantMaxLoad {@code true} if the requested utilization represents the peak load, {@code false} otherwise.
+   * @param wantAvgLoad {@code true} if the requested utilization represents the avg load, {@code false} otherwise.
    * @return A single representative utilization value on a metric type.
    */
   public double expectedUtilizationFor(KafkaMetricDef metric, boolean wantMaxLoad, boolean wantAvgLoad) {
@@ -143,13 +140,13 @@ public class Load implements Serializable {
       case MAX: return max(valuesForId.max(), 0.0);
       case AVG: return max(valuesForId.avg(), 0.0);
       case LATEST: return max(valuesForId.latest(), 0.0);
-      default: throw new IllegalArgumentException("Metric value computing strategy " + metric.valueComputingStrategy() +
-                          " for metric " + metric.name() + " is invalid.");
+      default: throw new IllegalArgumentException("Metric value computing strategy " + metric.valueComputingStrategy()
+                                                  + " for metric " + metric.name() + " is invalid.");
     }
   }
 
   /**
-   * @return True if this load is empty, false otherwise.
+   * @return {@code true} if this load is empty, {@code false} otherwise.
    */
   boolean isEmpty() {
     return _metricValues.isEmpty();
@@ -162,8 +159,8 @@ public class Load implements Serializable {
    */
   void setLoad(AggregatedMetricValues loadToSet) {
     if (loadToSet.length() != _metricValues.length()) {
-      throw new IllegalArgumentException("Load to set and load for the resources must have exactly " +
-                                         _metricValues.length() + " entries.");
+      throw new IllegalArgumentException("Load to set and load for the resources must have exactly "
+                                         + _metricValues.length() + " entries.");
     }
     loadToSet.metricIds().forEach(id -> {
       MetricValues valuesToSet = loadToSet.valuesFor(id);
@@ -182,8 +179,8 @@ public class Load implements Serializable {
    */
   void setLoad(short metricId, MetricValues loadToSet) {
     if (loadToSet.length() != _metricValues.length()) {
-      throw new IllegalArgumentException("Load to set and load for the resources must have exactly " +
-                                             _metricValues.length() + " entries.");
+      throw new IllegalArgumentException("Load to set and load for the resources must have exactly "
+                                         + _metricValues.length() + " entries.");
     }
     MetricValues values = _metricValues.valuesFor(metricId);
     for (int i = 0; i < loadToSet.length(); i++) {
@@ -197,9 +194,7 @@ public class Load implements Serializable {
    * @param resource Resource for which the utilization will be cleared.
    */
   void clearLoadFor(Resource resource) {
-    KafkaMetricDef.resourceToMetricIds(resource).forEach(id -> {
-      _metricValues.valuesFor(id).clear();
-    });
+    KafkaMetricDef.resourceToMetricIds(resource).forEach(id -> _metricValues.valuesFor(id).clear());
   }
 
   /**
@@ -239,15 +234,6 @@ public class Load implements Serializable {
   }
 
   /**
-   * Subtract the given load from this load.
-   *
-   * @param loadToSubtract Load to subtract from this load.
-   */
-  void subtractLoad(Load loadToSubtract) {
-    _metricValues.subtract(loadToSubtract.loadByWindows());
-  }
-
-  /**
    * Add the given load for the given resource to this load.
    *
    * @param loadToAdd Load to add to this load for the given resource.
@@ -256,6 +242,15 @@ public class Load implements Serializable {
     if (!_metricValues.isEmpty()) {
       _metricValues.add(loadToAdd);
     }
+  }
+
+  /**
+   * Subtract the given load from this load.
+   *
+   * @param loadToSubtract Load to subtract from this load.
+   */
+  void subtractLoad(Load loadToSubtract) {
+    _metricValues.subtract(loadToSubtract.loadByWindows());
   }
 
   /**
@@ -328,38 +323,5 @@ public class Load implements Serializable {
   @Override
   public String toString() {
     return String.format("Load[metricValues=%s]", _metricValues);
-  }
-
-  /**
-   * Get a single snapshot value that is representative for the given resource. The current algorithm uses
-   * (1) the mean of the recent resource load for inbound network load, outbound network load, and cpu load
-   * (2) the latest utilization for disk space usage.
-   *
-   * @param resource Resource for which the expected utilization will be provided.
-   * @param aggregatedMetricValues the aggregated metric values to calculate the expected utilization.
-   * @param ignoreMissingMetric whether it is allowed for the value of the given resource to be missing.
-   *                            If the value of the given resource is not found, when set to true, 0 will be returned.
-   *                            Otherwise, an exception will be thrown.
-   * @return A single representative utilization value on a resource.
-   */
-  public static double expectedUtilizationFor(Resource resource,
-                                              AggregatedMetricValues aggregatedMetricValues,
-                                              boolean ignoreMissingMetric) {
-    if (aggregatedMetricValues.isEmpty()) {
-      return 0.0;
-    }
-    double result = 0;
-    for (MetricInfo info : KafkaMetricDef.resourceToMetricInfo(resource)) {
-      MetricValues valuesForId = aggregatedMetricValues.valuesFor(info.id());
-      if (!ignoreMissingMetric && valuesForId == null) {
-        throw new IllegalArgumentException(String.format("The aggregated metric values does not contain metric "
-                                                             + "%s for resource %s.",
-                                                         info, resource.name()));
-      }
-      if (valuesForId != null) {
-        result += resource == Resource.DISK ? valuesForId.latest() : valuesForId.avg();
-      }
-    }
-    return max(result, 0.0);
   }
 }

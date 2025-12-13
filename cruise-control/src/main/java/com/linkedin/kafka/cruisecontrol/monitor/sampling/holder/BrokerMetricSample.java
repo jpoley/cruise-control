@@ -39,8 +39,8 @@ public class BrokerMetricSample extends MetricSample<String, BrokerEntity> {
     }
 
     if (deserializationVersion < MIN_SUPPORTED_VERSION || deserializationVersion > LATEST_SUPPORTED_VERSION) {
-      throw new UnknownVersionException("Unsupported serialization version: " + deserializationVersion + " (Latest: " +
-                                        LATEST_SUPPORTED_VERSION + ", Minimum: " + MIN_SUPPORTED_VERSION + ")");
+      throw new UnknownVersionException("Unsupported serialization version: " + deserializationVersion + " (Latest: "
+                                        + LATEST_SUPPORTED_VERSION + ", Minimum: " + MIN_SUPPORTED_VERSION + ")");
     }
 
     _deserializationVersion = deserializationVersion;
@@ -55,7 +55,7 @@ public class BrokerMetricSample extends MetricSample<String, BrokerEntity> {
   }
 
   /**
-   * Serialize the partition metric sample using the {@link #LATEST_SUPPORTED_VERSION} protocol. The version field
+   * Serialize the broker metric sample using the {@link #LATEST_SUPPORTED_VERSION} protocol. The version field
    * indicates the version that a deserializer should use.
    *
    * 1 byte - version
@@ -141,7 +141,7 @@ public class BrokerMetricSample extends MetricSample<String, BrokerEntity> {
     buffer.putDouble(metricValue(DISK_USAGE));
     buffer.putDouble(metricValue(PRODUCE_RATE));
     buffer.putDouble(metricValue(FETCH_RATE));
-    buffer.putLong(_sampleTime);
+    buffer.putLong(_sampleTimeMs);
     buffer.putInt(metricValue(BROKER_REQUEST_QUEUE_SIZE).intValue());
     buffer.putInt(metricValue(BROKER_RESPONSE_QUEUE_SIZE).intValue());
     buffer.putDouble(metricValue(BROKER_PRODUCE_REQUEST_QUEUE_TIME_MS_MAX));
@@ -204,8 +204,8 @@ public class BrokerMetricSample extends MetricSample<String, BrokerEntity> {
       case 5:
         return readV5(buffer);
       default:
-        throw new UnknownVersionException("Unsupported deserialization version: " + version + " (Latest: " +
-                                          LATEST_SUPPORTED_VERSION + ", Minimum: " + MIN_SUPPORTED_VERSION + ")");
+        throw new UnknownVersionException("Unsupported deserialization version: " + version + " (Latest: "
+                                          + LATEST_SUPPORTED_VERSION + ", Minimum: " + MIN_SUPPORTED_VERSION + ")");
     }
   }
 

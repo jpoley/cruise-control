@@ -11,6 +11,10 @@ import java.util.Collection;
 import java.util.Map;
 
 
+/**
+ * An interface to provide custom finders for metric anomalies.
+ * @param <E> The entity for which metrics will be tracked.
+ */
 public interface MetricAnomalyFinder<E extends Entity> extends CruiseControlConfigurable {
 
   /**
@@ -24,4 +28,12 @@ public interface MetricAnomalyFinder<E extends Entity> extends CruiseControlConf
    */
   Collection<MetricAnomaly<E>> metricAnomalies(Map<E, ValuesAndExtrapolations> metricsHistoryByEntity,
                                                Map<E, ValuesAndExtrapolations> currentMetricsByEntity);
+
+  /**
+   * Get the latest number of metric anomalies with the given type detected by this metric anomaly finder.
+   *
+   * @param type Metric anomaly type for which the latest number of metric anomalies is queried.
+   * @return The latest number of metric anomalies with the given type detected by this metric anomaly finder.
+   */
+  int numAnomaliesOfType(MetricAnomalyType type);
 }

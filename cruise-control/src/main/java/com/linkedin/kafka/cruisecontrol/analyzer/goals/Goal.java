@@ -6,13 +6,14 @@
 package com.linkedin.kafka.cruisecontrol.analyzer.goals;
 
 import com.linkedin.cruisecontrol.common.CruiseControlConfigurable;
+import com.linkedin.kafka.cruisecontrol.analyzer.ProvisionResponse;
+import com.linkedin.kafka.cruisecontrol.analyzer.ProvisionStatus;
 import com.linkedin.kafka.cruisecontrol.analyzer.OptimizationOptions;
 import com.linkedin.kafka.cruisecontrol.analyzer.ActionAcceptance;
 import com.linkedin.kafka.cruisecontrol.analyzer.BalancingAction;
 import com.linkedin.kafka.cruisecontrol.exception.KafkaCruiseControlException;
 import com.linkedin.kafka.cruisecontrol.exception.OptimizationFailureException;
 import com.linkedin.kafka.cruisecontrol.model.ClusterModel;
-
 import com.linkedin.kafka.cruisecontrol.model.ClusterModelStats;
 import com.linkedin.kafka.cruisecontrol.monitor.ModelCompletenessRequirements;
 import java.io.Serializable;
@@ -60,7 +61,7 @@ public interface Goal extends CruiseControlConfigurable {
    *                       optimization of the previously optimized goals.
    * @param optimizedGoals Goals that have already been optimized. These goals cannot be violated.
    * @param optimizationOptions Options to take into account during optimization.
-   * @return True if the goal is met after the optimization, false otherwise. Note that for hard goals,
+   * @return {@code true} if the goal is met after the optimization, {@code false} otherwise. Note that for hard goals,
    * the implementation should just throw exceptions if the goal is not met.
    * @throws KafkaCruiseControlException
    */
@@ -118,12 +119,27 @@ public interface Goal extends CruiseControlConfigurable {
   void finish();
 
   /**
-   * @return True if this is a hard goal, false otherwise.
+   * @return {@code true} if this is a hard goal, {@code false} otherwise.
    */
   boolean isHardGoal();
 
   /**
+   * @return The {@link ProvisionStatus} of this goal.
+   * @deprecated Will be removed in a future release -- please use {@link #provisionResponse()}.
+   */
+  @Deprecated
+  ProvisionStatus provisionStatus();
+
+  /**
+   * @return The {@link ProvisionResponse} of this goal.
+   */
+  ProvisionResponse provisionResponse();
+
+  /**
    * A comparator that compares two cluster model stats.
+   * <p>
+   *   Note: this comparator imposes orderings that are inconsistent with equals.
+   * </p>
    */
   interface ClusterModelStatsComparator extends Comparator<ClusterModelStats>, Serializable {
 

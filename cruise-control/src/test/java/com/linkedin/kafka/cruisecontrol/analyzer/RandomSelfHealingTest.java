@@ -5,16 +5,19 @@
 package com.linkedin.kafka.cruisecontrol.analyzer;
 
 import com.linkedin.kafka.cruisecontrol.KafkaCruiseControlUnitTestUtils;
+import com.linkedin.kafka.cruisecontrol.analyzer.goals.BrokerSetAwareGoal;
 import com.linkedin.kafka.cruisecontrol.analyzer.goals.CpuCapacityGoal;
 import com.linkedin.kafka.cruisecontrol.analyzer.goals.CpuUsageDistributionGoal;
 import com.linkedin.kafka.cruisecontrol.analyzer.goals.DiskCapacityGoal;
 import com.linkedin.kafka.cruisecontrol.analyzer.goals.DiskUsageDistributionGoal;
 import com.linkedin.kafka.cruisecontrol.analyzer.goals.LeaderReplicaDistributionGoal;
+import com.linkedin.kafka.cruisecontrol.analyzer.goals.MinTopicLeadersPerBrokerGoal;
 import com.linkedin.kafka.cruisecontrol.analyzer.goals.NetworkInboundCapacityGoal;
 import com.linkedin.kafka.cruisecontrol.analyzer.goals.NetworkInboundUsageDistributionGoal;
 import com.linkedin.kafka.cruisecontrol.analyzer.goals.NetworkOutboundCapacityGoal;
 import com.linkedin.kafka.cruisecontrol.analyzer.goals.NetworkOutboundUsageDistributionGoal;
 import com.linkedin.kafka.cruisecontrol.analyzer.goals.PotentialNwOutGoal;
+import com.linkedin.kafka.cruisecontrol.analyzer.goals.RackAwareDistributionGoal;
 import com.linkedin.kafka.cruisecontrol.analyzer.goals.RackAwareGoal;
 import com.linkedin.kafka.cruisecontrol.analyzer.goals.ReplicaCapacityGoal;
 import com.linkedin.kafka.cruisecontrol.analyzer.goals.ReplicaDistributionGoal;
@@ -27,7 +30,6 @@ import com.linkedin.kafka.cruisecontrol.config.constants.AnalyzerConfig;
 import com.linkedin.kafka.cruisecontrol.model.RandomCluster;
 import com.linkedin.kafka.cruisecontrol.common.TestConstants;
 import com.linkedin.kafka.cruisecontrol.model.ClusterModel;
-
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collection;
@@ -36,7 +38,7 @@ import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
-
+import java.util.Objects;
 import java.util.Properties;
 import java.util.Set;
 import org.junit.Test;
@@ -52,6 +54,40 @@ import static org.junit.Assert.assertTrue;
 @RunWith(Parameterized.class)
 public class RandomSelfHealingTest {
   private static final Logger LOG = LoggerFactory.getLogger(RandomSelfHealingTest.class);
+  private final int _testId;
+  private final Map<ClusterProperty, Number> _modifiedProperties;
+  private final List<String> _goalNameByPriority;
+  private final BalancingConstraint _balancingConstraint;
+  private final Set<String> _excludedTopics;
+  private final List<OptimizationVerifier.Verification> _verifications;
+  private final boolean _leaderInFirstPosition;
+
+  /**
+   * Constructor of Self Healing Test.
+   *
+   * @param testId Test id.
+   * @param modifiedProperties Modified cluster properties over the {@link TestConstants#BASE_PROPERTIES}.
+   * @param goalNameByPriority Goal name by priority.
+   * @param balancingConstraint Balancing constraint.
+   * @param excludedTopics Excluded topics.
+   * @param verifications the verifications to make.
+   * @param leaderInFirstPosition Leader of each partition is in the first position or not.
+   */
+  public RandomSelfHealingTest(int testId,
+                               Map<ClusterProperty, Number> modifiedProperties,
+                               List<String> goalNameByPriority,
+                               BalancingConstraint balancingConstraint,
+                               Collection<String> excludedTopics,
+                               List<OptimizationVerifier.Verification> verifications,
+                               boolean leaderInFirstPosition) {
+    _testId = testId;
+    _modifiedProperties = modifiedProperties;
+    _goalNameByPriority = goalNameByPriority;
+    _balancingConstraint = balancingConstraint;
+    _excludedTopics = new HashSet<>(excludedTopics);
+    _verifications = verifications;
+    _leaderInFirstPosition = leaderInFirstPosition;
+  }
 
   /**
    * Populate parameters for the {@link OptimizationVerifier}.
@@ -63,7 +99,10 @@ public class RandomSelfHealingTest {
     Collection<Object[]> p = new ArrayList<>();
 
     // Sorted by priority.
-    List<String> goalNameByPriority = Arrays.asList(RackAwareGoal.class.getName(),
+    List<String> goalNameByPriority = Arrays.asList(BrokerSetAwareGoal.class.getName(),
+                                                    RackAwareGoal.class.getName(),
+                                                    RackAwareDistributionGoal.class.getName(),
+                                                    MinTopicLeadersPerBrokerGoal.class.getName(),
                                                     ReplicaCapacityGoal.class.getName(),
                                                     DiskCapacityGoal.class.getName(),
                                                     NetworkInboundCapacityGoal.class.getName(),
@@ -83,6 +122,9 @@ public class RandomSelfHealingTest {
 
     Properties props = KafkaCruiseControlUnitTestUtils.getKafkaCruiseControlProperties();
     props.setProperty(AnalyzerConfig.MAX_REPLICAS_PER_BROKER_CONFIG, Long.toString(2000L));
+    String brokerSetsDataFile = Objects.requireNonNull(KafkaCruiseControlUnitTestUtils.class.getClassLoader().getResource(
+        TestConstants.BROKER_SET_RESOLVER_FILE_3)).getFile();
+    props.setProperty(AnalyzerConfig.BROKER_SET_CONFIG_FILE_CONFIG, brokerSetsDataFile);
     BalancingConstraint constraint = new BalancingConstraint(new KafkaCruiseControlConfig(props));
     constraint.setResourceBalancePercentage(TestConstants.LOW_BALANCE_PERCENTAGE);
     constraint.setCapacityThreshold(TestConstants.MEDIUM_CAPACITY_THRESHOLD);
@@ -143,53 +185,6 @@ public class RandomSelfHealingTest {
     return p;
   }
 
-  private static Object[] params(int testId,
-                                 Map<ClusterProperty, Number> modifiedProperties,
-                                 List<String> goalNameByPriority,
-                                 BalancingConstraint balancingConstraint,
-                                 Collection<String> excludedTopics,
-                                 List<OptimizationVerifier.Verification> verifications,
-                                 boolean leaderInFirstPosition) {
-    return new Object[]{
-        testId, modifiedProperties, goalNameByPriority, balancingConstraint, excludedTopics, verifications, leaderInFirstPosition
-    };
-  }
-
-  private int _testId;
-  private Map<ClusterProperty, Number> _modifiedProperties;
-  private List<String> _goalNameByPriority;
-  private BalancingConstraint _balancingConstraint;
-  private Set<String> _excludedTopics;
-  private List<OptimizationVerifier.Verification> _verifications;
-  private boolean _leaderInFirstPosition;
-
-  /**
-   * Constructor of Self Healing Test.
-   *
-   * @param testId Test id.
-   * @param modifiedProperties Modified cluster properties over the {@link TestConstants#BASE_PROPERTIES}.
-   * @param goalNameByPriority Goal name by priority.
-   * @param balancingConstraint Balancing constraint.
-   * @param excludedTopics Excluded topics.
-   * @param verifications the verifications to make.
-   * @param leaderInFirstPosition Leader of each partition is in the first position or not.
-   */
-  public RandomSelfHealingTest(int testId,
-                               Map<ClusterProperty, Number> modifiedProperties,
-                               List<String> goalNameByPriority,
-                               BalancingConstraint balancingConstraint,
-                               Collection<String> excludedTopics,
-                               List<OptimizationVerifier.Verification> verifications,
-                               boolean leaderInFirstPosition) {
-    _testId = testId;
-    _modifiedProperties = modifiedProperties;
-    _goalNameByPriority = goalNameByPriority;
-    _balancingConstraint = balancingConstraint;
-    _excludedTopics = new HashSet<>(excludedTopics);
-    _verifications = verifications;
-    _leaderInFirstPosition = leaderInFirstPosition;
-  }
-
   @Test
   public void test() throws Exception {
     // Create cluster properties by applying modified properties to base properties.
@@ -205,5 +200,17 @@ public class RandomSelfHealingTest {
                OptimizationVerifier.executeGoalsFor(_balancingConstraint, clusterModel, _goalNameByPriority,
                                                     _excludedTopics, _verifications));
 
+  }
+
+  private static Object[] params(int testId,
+                                 Map<ClusterProperty, Number> modifiedProperties,
+                                 List<String> goalNameByPriority,
+                                 BalancingConstraint balancingConstraint,
+                                 Collection<String> excludedTopics,
+                                 List<OptimizationVerifier.Verification> verifications,
+                                 boolean leaderInFirstPosition) {
+    return new Object[]{
+        testId, modifiedProperties, goalNameByPriority, balancingConstraint, excludedTopics, verifications, leaderInFirstPosition
+    };
   }
 }

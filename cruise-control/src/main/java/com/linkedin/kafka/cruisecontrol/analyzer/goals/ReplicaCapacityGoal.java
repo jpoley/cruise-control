@@ -10,10 +10,11 @@ import com.linkedin.kafka.cruisecontrol.analyzer.ActionAcceptance;
 import com.linkedin.kafka.cruisecontrol.analyzer.BalancingConstraint;
 import com.linkedin.kafka.cruisecontrol.analyzer.BalancingAction;
 import com.linkedin.kafka.cruisecontrol.analyzer.ActionType;
+import com.linkedin.kafka.cruisecontrol.analyzer.ProvisionRecommendation;
+import com.linkedin.kafka.cruisecontrol.analyzer.ProvisionStatus;
 import com.linkedin.kafka.cruisecontrol.exception.OptimizationFailureException;
 import com.linkedin.kafka.cruisecontrol.model.Broker;
 import com.linkedin.kafka.cruisecontrol.model.ClusterModel;
-import com.linkedin.kafka.cruisecontrol.model.ClusterModelStats;
 import com.linkedin.kafka.cruisecontrol.model.Replica;
 import com.linkedin.kafka.cruisecontrol.model.ReplicaSortFunctionFactory;
 import com.linkedin.kafka.cruisecontrol.model.SortedReplicasHelper;
@@ -70,12 +71,10 @@ public class ReplicaCapacityGoal extends AbstractGoal {
   public ActionAcceptance actionAcceptance(BalancingAction action, ClusterModel clusterModel) {
     switch (action.balancingAction()) {
       case INTER_BROKER_REPLICA_MOVEMENT:
-      case REPLICA_ADDITION:
         Broker destinationBroker = clusterModel.broker(action.destinationBrokerId());
         return destinationBroker.replicas().size() < _balancingConstraint.maxReplicasPerBroker() ? ACCEPT : REPLICA_REJECT;
       case INTER_BROKER_REPLICA_SWAP:
       case LEADERSHIP_MOVEMENT:
-      case REPLICA_DELETION:
         return ACCEPT;
       default:
         throw new IllegalArgumentException("Unsupported balancing action " + action.balancingAction() + " is provided.");
@@ -84,7 +83,7 @@ public class ReplicaCapacityGoal extends AbstractGoal {
 
   @Override
   public ClusterModelStatsComparator clusterModelStatsComparator() {
-    return new ReplicaCapacityGoalStatsComparator();
+    return new GoalUtils.HardGoalStatsComparator();
   }
 
   @Override
@@ -93,26 +92,8 @@ public class ReplicaCapacityGoal extends AbstractGoal {
   }
 
   @Override
-  public String name() {
-    return ReplicaCapacityGoal.class.getSimpleName();
-  }
-
-  @Override
   public boolean isHardGoal() {
     return true;
-  }
-
-  /**
-   * This is a hard goal; hence, the proposals are not limited to dead broker replicas in case of self-healing.
-   * Get brokers that the rebalance process will go over to apply balancing actions to replicas they contain.
-   *
-   * @param clusterModel The state of the cluster.
-   * @return A collection of brokers that the rebalance process will go over to apply balancing actions to replicas
-   * they contain.
-   */
-  @Override
-  protected SortedSet<Broker> brokersToBalance(ClusterModel clusterModel) {
-    return clusterModel.brokers();
   }
 
   /**
@@ -151,39 +132,35 @@ public class ReplicaCapacityGoal extends AbstractGoal {
       }
 
       if (excludedReplicasInBroker.size() > _balancingConstraint.maxReplicasPerBroker()) {
-        String mitigation = GoalUtils.mitigationForOptimizationFailures(optimizationOptions);
         throw new OptimizationFailureException(
-            String.format("[%s] Replicas of excluded topics in broker: %d exceeds the maximum allowed number of replicas per "
-                              + "broker: %d. %s", name(), excludedReplicasInBroker.size(), _balancingConstraint.maxReplicasPerBroker(), mitigation));
+            String.format("[%s] Replicas of excluded topics in broker: %d exceeds the maximum allowed number of replicas per broker: %d.",
+                          name(), excludedReplicasInBroker.size(), _balancingConstraint.maxReplicasPerBroker()));
       }
     }
 
     // Sanity check: total replicas in the cluster cannot be more than the allowed replicas in the cluster.
-    long maxReplicasInCluster = _balancingConstraint.maxReplicasPerBroker() * clusterModel.aliveBrokers().size();
+    Set<Integer> brokersAllowedReplicaMove = GoalUtils.aliveBrokersNotExcludedForReplicaMove(clusterModel, optimizationOptions);
+    long maxReplicasInCluster = _balancingConstraint.maxReplicasPerBroker() * brokersAllowedReplicaMove.size();
     if (totalReplicasInCluster > maxReplicasInCluster) {
+      int minRequiredBrokers = (int) Math.ceil(totalReplicasInCluster / (double) _balancingConstraint.maxReplicasPerBroker());
+      int numBrokersToAdd = minRequiredBrokers - brokersAllowedReplicaMove.size();
+      ProvisionRecommendation recommendation = new ProvisionRecommendation.Builder(ProvisionStatus.UNDER_PROVISIONED)
+          .numBrokers(numBrokersToAdd).build();
       throw new OptimizationFailureException(
           String.format("[%s] Total replicas in cluster: %d exceeds the maximum allowed replicas in cluster: %d (Alive "
                             + "brokers: %d, Allowed number of replicas per broker: %d).",
                         name(), totalReplicasInCluster, maxReplicasInCluster, clusterModel.aliveBrokers().size(),
-                        _balancingConstraint.maxReplicasPerBroker()));
+                        _balancingConstraint.maxReplicasPerBroker()), recommendation);
     }
 
     // Filter out some replicas based on optimization options.
     new SortedReplicasHelper().maybeAddSelectionFunc(ReplicaSortFunctionFactory.selectImmigrants(),
                                                      optimizationOptions.onlyMoveImmigrantReplicas())
-                              .addSelectionFunc(ReplicaSortFunctionFactory.selectReplicasBasedOnExcludedTopics(excludedTopics))
+                              .maybeAddSelectionFunc(ReplicaSortFunctionFactory.selectReplicasBasedOnExcludedTopics(excludedTopics),
+                                                     !excludedTopics.isEmpty())
                               .trackSortedReplicasFor(replicaSortName(this, false, false), clusterModel);
   }
 
-  /**
-   * Check if requirements of this goal are not violated if this action is applied to the given cluster state,
-   * false otherwise.
-   *
-   * @param clusterModel The state of the cluster.
-   * @param action Action containing information about potential modification to the given cluster model.
-   * @return True if requirements of this goal are not violated if this action is applied to the given cluster state,
-   * false otherwise.
-   */
   @Override
   protected boolean selfSatisfied(ClusterModel clusterModel, BalancingAction action) {
     Broker destinationBroker = clusterModel.broker(action.destinationBrokerId());
@@ -214,11 +191,6 @@ public class ReplicaCapacityGoal extends AbstractGoal {
     }
   }
 
-  @Override
-  public void finish() {
-    _finished = true;
-  }
-
   /**
    * Sanity check: Ensure that the replica capacity per broker is not exceeded.
    *
@@ -230,10 +202,10 @@ public class ReplicaCapacityGoal extends AbstractGoal {
     for (Broker broker : brokersToBalance(clusterModel)) {
       int numBrokerReplicas = broker.replicas().size();
       if (numBrokerReplicas > _balancingConstraint.maxReplicasPerBroker()) {
-        String mitigation = GoalUtils.mitigationForOptimizationFailures(optimizationOptions);
+        ProvisionRecommendation recommendation = new ProvisionRecommendation.Builder(ProvisionStatus.UNDER_PROVISIONED).numBrokers(1).build();
         throw new OptimizationFailureException(
-            String.format("[%s] Replicas in broker %d exceeds the maximum allowed number of replicas per broker: %d. %s",
-                          name(), numBrokerReplicas, _balancingConstraint.maxReplicasPerBroker(), mitigation));
+            String.format("[%s] Replica count (%d) in broker %d exceeds the maximum allowed number of replicas per broker: %d.",
+                          name(), numBrokerReplicas, broker.id(), _balancingConstraint.maxReplicasPerBroker()), recommendation);
       }
     }
   }
@@ -269,16 +241,18 @@ public class ReplicaCapacityGoal extends AbstractGoal {
       if (b == null) {
         if (!broker.isAlive()) {
           // If the replica resides in a dead broker, throw an exception!
+          ProvisionRecommendation recommendation = new ProvisionRecommendation.Builder(ProvisionStatus.UNDER_PROVISIONED).numBrokers(1).build();
           throw new OptimizationFailureException(
               String.format("[%s] Failed to move dead broker replica %s of partition %s to a broker in %s. Per broker limit: "
                             + "%d for brokers: %s", name(), replica, clusterModel.partition(replica.topicPartition()),
-                            eligibleBrokers, _balancingConstraint.maxReplicasPerBroker(), clusterModel.brokers()));
+                            eligibleBrokers, _balancingConstraint.maxReplicasPerBroker(), clusterModel.brokers()), recommendation);
         } else if (isReplicaOffline) {
           // If the replica is offline on a broker with bad disk, throw an exception!
+          ProvisionRecommendation recommendation = new ProvisionRecommendation.Builder(ProvisionStatus.UNDER_PROVISIONED).numBrokers(1).build();
           throw new OptimizationFailureException(
               String.format("[%s] Failed to move offline replica %s of partition %s to a broker in %s. Per broker limit: "
                             + "%d for brokers: %s", name(), replica, clusterModel.partition(replica.topicPartition()),
-                            eligibleBrokers, _balancingConstraint.maxReplicasPerBroker(), clusterModel.brokers()));
+                            eligibleBrokers, _balancingConstraint.maxReplicasPerBroker(), clusterModel.brokers()), recommendation);
         }
         LOG.debug("Failed to move replica {} to any broker in {}.", replica, eligibleBrokers);
       }
@@ -290,7 +264,7 @@ public class ReplicaCapacityGoal extends AbstractGoal {
    *
    * A alive destination broker is eligible for a given replica if
    * (1) the broker contains less than allowed maximum number of replicas, or
-   * (2) If the the self healing mode is true.
+   * (2) If the self healing mode is true.
    *
    * Returned brokers are sorted by number of replicas on them in ascending order.
    *
@@ -315,26 +289,12 @@ public class ReplicaCapacityGoal extends AbstractGoal {
     return eligibleBrokers;
   }
 
-  private static class ReplicaCapacityGoalStatsComparator implements ClusterModelStatsComparator {
-
-    @Override
-    public int compare(ClusterModelStats stats1, ClusterModelStats stats2) {
-      // This goal do not care about stats. The optimization would have already failed if the goal is not met.
-      return 0;
-    }
-
-    @Override
-    public String explainLastComparison() {
-      return null;
-    }
-  }
-
   /**
    * A helper class for this goal to keep track of the number of replicas assigned to brokers.
    */
   private static class BrokerReplicaCount implements Comparable<BrokerReplicaCount> {
     private final Broker _broker;
-    private int _replicaCount;
+    private final int _replicaCount;
 
     BrokerReplicaCount(Broker broker) {
       _broker = broker;

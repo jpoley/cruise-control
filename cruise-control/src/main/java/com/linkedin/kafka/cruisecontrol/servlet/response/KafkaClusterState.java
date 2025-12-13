@@ -5,6 +5,7 @@
 package com.linkedin.kafka.cruisecontrol.servlet.response;
 
 import com.google.gson.Gson;
+import com.linkedin.kafka.cruisecontrol.config.BrokerSetResolver;
 import com.linkedin.kafka.cruisecontrol.config.TopicConfigProvider;
 import com.linkedin.kafka.cruisecontrol.config.KafkaCruiseControlConfig;
 import com.linkedin.cruisecontrol.servlet.parameters.CruiseControlParameters;
@@ -14,6 +15,7 @@ import java.util.Map;
 import java.util.Properties;
 import java.util.concurrent.ExecutionException;
 import java.util.regex.Pattern;
+import org.apache.kafka.clients.admin.AdminClient;
 import org.apache.kafka.common.Cluster;
 
 import static com.linkedin.kafka.cruisecontrol.servlet.response.ResponseUtils.JSON_VERSION;
@@ -22,26 +24,29 @@ import static com.linkedin.kafka.cruisecontrol.servlet.response.ResponseUtils.VE
 @JsonResponseClass
 public class KafkaClusterState extends AbstractCruiseControlResponse {
   @JsonResponseField
-  protected static final String KAFKA_BROKER_STATE = "KafkaBrokerState";
+  public static final String KAFKA_BROKER_STATE = "KafkaBrokerState";
   @JsonResponseField
-  protected static final String KAFKA_PARTITION_STATE = "KafkaPartitionState";
+  public static final String KAFKA_PARTITION_STATE = "KafkaPartitionState";
   protected final Map<String, Properties> _allTopicConfigs;
   protected final Properties _clusterConfigs;
-  protected final Map<String, Object> _adminClientConfigs;
+  protected final AdminClient _adminClient;
+  protected final BrokerSetResolver _brokerSetResolver;
   protected Cluster _kafkaCluster;
 
   public KafkaClusterState(Cluster kafkaCluster,
                            TopicConfigProvider topicConfigProvider,
-                           Map<String, Object> adminClientConfigs,
-                           KafkaCruiseControlConfig config) {
+                           AdminClient adminClient,
+                           KafkaCruiseControlConfig config,
+                           BrokerSetResolver brokerSetResolver) {
     super(config);
     _kafkaCluster = kafkaCluster;
-    _allTopicConfigs = topicConfigProvider.allTopicConfigs();
+    _allTopicConfigs = topicConfigProvider.topicConfigs(_kafkaCluster.topics());
     _clusterConfigs = topicConfigProvider.clusterConfigs();
-    _adminClientConfigs = adminClientConfigs;
+    _adminClient = adminClient;
+    _brokerSetResolver = brokerSetResolver;
   }
 
-  protected String getJSONString(CruiseControlParameters parameters) {
+  protected String getJsonString(CruiseControlParameters parameters) {
     Gson gson = new Gson();
     Map<String, Object> jsonStructure;
     KafkaClusterStateParameters kafkaClusterStateParams = (KafkaClusterStateParameters) parameters;
@@ -50,7 +55,7 @@ public class KafkaClusterState extends AbstractCruiseControlResponse {
     try {
       jsonStructure = getJsonStructure(isVerbose, topic);
       jsonStructure.put(VERSION, JSON_VERSION);
-    }  catch (InterruptedException | ExecutionException e) {
+    } catch (InterruptedException | ExecutionException e) {
       throw new RuntimeException("Failed to populate broker logDir state.", e);
     }
     return gson.toJson(jsonStructure);
@@ -59,7 +64,7 @@ public class KafkaClusterState extends AbstractCruiseControlResponse {
   /**
    * Return an object that can be further used to encode into JSON.
    *
-   * @param verbose True if verbose, false otherwise.
+   * @param verbose {@code true} if verbose, {@code false} otherwise.
    * @param topic Regex of topic to filter partition states by, is null if no filter is to be applied
    * @return An object that can be further used to encode into JSON.
    */
@@ -67,7 +72,7 @@ public class KafkaClusterState extends AbstractCruiseControlResponse {
       throws ExecutionException, InterruptedException {
     Map<String, Object> cruiseControlState = new HashMap<>();
     cruiseControlState.put(KAFKA_BROKER_STATE,
-                           new ClusterBrokerState(_kafkaCluster, _adminClientConfigs, _config).getJsonStructure());
+                           new ClusterBrokerState(_kafkaCluster, _adminClient, _config, _brokerSetResolver).getJsonStructure());
     cruiseControlState.put(KAFKA_PARTITION_STATE,
                            new ClusterPartitionState(verbose, topic, _kafkaCluster, _allTopicConfigs, _clusterConfigs).getJsonStructure());
     return cruiseControlState;
@@ -80,7 +85,7 @@ public class KafkaClusterState extends AbstractCruiseControlResponse {
     StringBuilder sb = new StringBuilder();
     try {
       // Broker summary.
-      new ClusterBrokerState(_kafkaCluster, _adminClientConfigs, _config).writeBrokerSummary(sb);
+      new ClusterBrokerState(_kafkaCluster, _adminClient, _config, _brokerSetResolver).writeBrokerSummary(sb);
       // Partition summary.
       new ClusterPartitionState(isVerbose, topic, _kafkaCluster, _allTopicConfigs, _clusterConfigs).writePartitionSummary(sb, isVerbose);
     } catch (InterruptedException | ExecutionException e) {
@@ -92,7 +97,7 @@ public class KafkaClusterState extends AbstractCruiseControlResponse {
   @Override
   protected void discardIrrelevantAndCacheRelevant(CruiseControlParameters parameters) {
     // Cache relevant response.
-    _cachedResponse = parameters.json() ? getJSONString(parameters) : getPlaintext(parameters);
+    _cachedResponse = parameters.json() ? getJsonString(parameters) : getPlaintext(parameters);
     // Discard irrelevant response.
     _kafkaCluster = null;
   }

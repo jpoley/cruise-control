@@ -17,6 +17,7 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
 import java.util.concurrent.ConcurrentSkipListMap;
 import java.util.concurrent.atomic.AtomicInteger;
+import javax.annotation.Nonnull;
 import org.apache.commons.math3.stat.regression.OLSMultipleLinearRegression;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -27,50 +28,47 @@ import static com.linkedin.kafka.cruisecontrol.monitor.metricdefinition.KafkaMet
 public class LinearRegressionModelParameters {
   private static final Logger LOG = LoggerFactory.getLogger(LinearRegressionModelParameters.class);
   private static final double LEADER_BYTES_IN_AND_OUT_DIVERSITY_THRESHOLD = 0.5;
-  private static int MIN_CPU_UTIL_OBSERVATION_BUCKETS;
-  private static int CPU_UTIL_BUCKET_SIZE;
+  private static int minCpuUtilObservationBuckets;
+  private static int cpuUtilBucketSize;
   // The metric observations we are going to use to do the linear regression. We just hard code it to 100 observations
   // for each CPU utilization bucket.
-  private static int NUM_OBSERVATIONS_PER_UTIL_BUCKET;
+  private static int numObservationsPerUtilBucket;
   private static final Map<Integer, double[][]> BYTE_RATE_OBSERVATIONS = new HashMap<>();
   private static final ConcurrentMap<Integer, double[]> CPU_UTIL_OBSERVATIONS = new ConcurrentHashMap<>();
   private static final ConcurrentMap<Integer, AtomicInteger> INDICES = new ConcurrentSkipListMap<>();
   private static final ConcurrentMap<Integer, Integer> OBSERVED_LEADER_TO_FOLLOWER_BYTES_RATIO = new ConcurrentSkipListMap<>();
   private static final ConcurrentMap<Integer, Integer> OBSERVED_LEADER_BYTES_IN_TO_BYTES_OUT_RATIO = new ConcurrentSkipListMap<>();
   private static final ConcurrentMap<Integer, Integer> CPU_UTIL_ESTIMATION_ERROR_STATS = new ConcurrentSkipListMap<>();
-  private static volatile Map<ModelCoefficient, Double> _coefficients = new HashMap<>();
+  private static final Map<ModelCoefficient, Double> COEFFICIENTS = new HashMap<>();
 
   static void init(KafkaCruiseControlConfig config) {
-    MIN_CPU_UTIL_OBSERVATION_BUCKETS =
-        config.getInt(MonitorConfig.LINEAR_REGRESSION_MODEL_MIN_NUM_CPU_UTIL_BUCKETS_CONFIG);
-    CPU_UTIL_BUCKET_SIZE =
-        config.getInt(MonitorConfig.LINEAR_REGRESSION_MODEL_CPU_UTIL_BUCKET_SIZE_CONFIG);
-    NUM_OBSERVATIONS_PER_UTIL_BUCKET =
-        config.getInt(MonitorConfig.LINEAR_REGRESSION_MODEL_REQUIRED_SAMPLES_PER_CPU_UTIL_BUCKET_CONFIG);
-    int numBuckets = 99 / CPU_UTIL_BUCKET_SIZE + 1;
-    if (MIN_CPU_UTIL_OBSERVATION_BUCKETS > (numBuckets)) {
+    minCpuUtilObservationBuckets = config.getInt(MonitorConfig.LINEAR_REGRESSION_MODEL_MIN_NUM_CPU_UTIL_BUCKETS_CONFIG);
+    cpuUtilBucketSize = config.getInt(MonitorConfig.LINEAR_REGRESSION_MODEL_CPU_UTIL_BUCKET_SIZE_CONFIG);
+    numObservationsPerUtilBucket = config.getInt(MonitorConfig.LINEAR_REGRESSION_MODEL_REQUIRED_SAMPLES_PER_CPU_UTIL_BUCKET_CONFIG);
+    int numBuckets = 99 / cpuUtilBucketSize + 1;
+    if (minCpuUtilObservationBuckets > numBuckets) {
       throw new IllegalArgumentException("There are only " + numBuckets + " CPU utilization buckets with "
-                                         + CPU_UTIL_BUCKET_SIZE + "%% bucket size. But "
+                                         + cpuUtilBucketSize + "%% bucket size. But "
                                          + MonitorConfig.LINEAR_REGRESSION_MODEL_MIN_NUM_CPU_UTIL_BUCKETS_CONFIG + " is "
-                                         + MIN_CPU_UTIL_OBSERVATION_BUCKETS
+                                         + minCpuUtilObservationBuckets
       );
     }
   }
 
   public synchronized boolean trainingCompleted() {
-    return _coefficients.size() > 0;
+    return COEFFICIENTS.size() > 0;
   }
 
   public Double getCoefficient(ModelCoefficient coefficient) {
-    return _coefficients.get(coefficient);
+    return COEFFICIENTS.get(coefficient);
   }
 
   /**
    * Trigger the calculation of the model parameters.
-   * @return True if the parameters are generated, otherwise false;
+   * @return {@code true} if the parameters are generated, otherwise {@code false};
    */
   public synchronized boolean updateModelCoefficient() {
-    if (validBuckets().size() < MIN_CPU_UTIL_OBSERVATION_BUCKETS) {
+    if (validBuckets().size() < minCpuUtilObservationBuckets) {
       return false;
     }
     try {
@@ -83,16 +81,16 @@ public class LinearRegressionModelParameters {
       int leaderBytesInIndex = 0;
       int leaderBytesOutIndex = 1;
       int followerBytesInIndex = ignoreLeaderBytesOut ? 1 : 2;
-      _coefficients.put(ModelCoefficient.LEADER_BYTES_IN, parameters[leaderBytesInIndex]);
+      COEFFICIENTS.put(ModelCoefficient.LEADER_BYTES_IN, parameters[leaderBytesInIndex]);
       if (!ignoreLeaderBytesOut) {
-        _coefficients.put(ModelCoefficient.LEADER_BYTES_OUT, parameters[leaderBytesOutIndex]);
+        COEFFICIENTS.put(ModelCoefficient.LEADER_BYTES_OUT, parameters[leaderBytesOutIndex]);
       }
-      _coefficients.put(ModelCoefficient.FOLLOWER_BYTES_IN, parameters[followerBytesInIndex]);
+      COEFFICIENTS.put(ModelCoefficient.FOLLOWER_BYTES_IN, parameters[followerBytesInIndex]);
 
       LOG.info("Coefficient generated: leader_bytes_in: {}, leader_bytes_out: {}, follower_bytes_in: {}",
-               _coefficients.get(ModelCoefficient.LEADER_BYTES_IN),
-               _coefficients.get(ModelCoefficient.LEADER_BYTES_OUT),
-               _coefficients.get(ModelCoefficient.FOLLOWER_BYTES_IN));
+               COEFFICIENTS.get(ModelCoefficient.LEADER_BYTES_IN),
+               COEFFICIENTS.get(ModelCoefficient.LEADER_BYTES_OUT),
+               COEFFICIENTS.get(ModelCoefficient.FOLLOWER_BYTES_IN));
       return true;
     } catch (Exception e) {
       LOG.warn("received exception {}", e);
@@ -108,28 +106,30 @@ public class LinearRegressionModelParameters {
   public synchronized void addMetricObservation(Collection<BrokerMetricSample> trainingData) {
     if (trainingData != null) {
       for (BrokerMetricSample data : trainingData) {
-        int utilBucket = (int) (data.metricValue(CPU_USAGE) / CPU_UTIL_BUCKET_SIZE);
+        int utilBucket = (int) (data.metricValue(CPU_USAGE) / cpuUtilBucketSize);
         int index =
-            INDICES.computeIfAbsent(utilBucket, k -> new AtomicInteger(0)).getAndIncrement() % NUM_OBSERVATIONS_PER_UTIL_BUCKET;
+            INDICES.computeIfAbsent(utilBucket, k -> new AtomicInteger(0)).getAndIncrement() % numObservationsPerUtilBucket;
         double[][] byteRateObservations =
-            BYTE_RATE_OBSERVATIONS.computeIfAbsent(utilBucket, k -> new double[NUM_OBSERVATIONS_PER_UTIL_BUCKET][]);
+            BYTE_RATE_OBSERVATIONS.computeIfAbsent(utilBucket, k -> new double[numObservationsPerUtilBucket][]);
         double[] cpuUtilObservation =
-            CPU_UTIL_OBSERVATIONS.computeIfAbsent(utilBucket, k -> new double[NUM_OBSERVATIONS_PER_UTIL_BUCKET]);
+            CPU_UTIL_OBSERVATIONS.computeIfAbsent(utilBucket, k -> new double[numObservationsPerUtilBucket]);
         byteRateObservations[index] =
             new double[]{data.metricValue(LEADER_BYTES_IN), data.metricValue(LEADER_BYTES_OUT), data.metricValue(REPLICATION_BYTES_IN_RATE)};
         cpuUtilObservation[index] = data.metricValue(CPU_USAGE);
-        int leaderToFollowerBytesInRatio = data.metricValue(REPLICATION_BYTES_IN_RATE) == 0.0 ? 10000000 :
-            (int) ((data.metricValue(LEADER_BYTES_IN) / data.metricValue(REPLICATION_BYTES_IN_RATE)) * 10);
-        int leaderBytesInToBytesOutRatio = data.metricValue(LEADER_BYTES_OUT) == 0.0 ? 10000000 :
-            (int) ((data.metricValue(LEADER_BYTES_IN) / data.metricValue(LEADER_BYTES_OUT)) * 10);
+        int leaderToFollowerBytesInRatio
+            = data.metricValue(REPLICATION_BYTES_IN_RATE) == 0.0
+              ? 10000000 : (int) ((data.metricValue(LEADER_BYTES_IN) / data.metricValue(REPLICATION_BYTES_IN_RATE)) * 10);
+        int leaderBytesInToBytesOutRatio
+            = data.metricValue(LEADER_BYTES_OUT) == 0.0
+              ? 10000000 : (int) ((data.metricValue(LEADER_BYTES_IN) / data.metricValue(LEADER_BYTES_OUT)) * 10);
         int count = OBSERVED_LEADER_TO_FOLLOWER_BYTES_RATIO.getOrDefault(leaderToFollowerBytesInRatio, 0);
         OBSERVED_LEADER_TO_FOLLOWER_BYTES_RATIO.put(leaderToFollowerBytesInRatio, count + 1);
         count = OBSERVED_LEADER_BYTES_IN_TO_BYTES_OUT_RATIO.getOrDefault(leaderBytesInToBytesOutRatio, 0);
         OBSERVED_LEADER_BYTES_IN_TO_BYTES_OUT_RATIO.put(leaderBytesInToBytesOutRatio, count + 1);
-        if (!_coefficients.isEmpty()) {
-          Double estimatedCpu = data.metricValue(LEADER_BYTES_IN) * _coefficients.get(ModelCoefficient.LEADER_BYTES_IN)
-              + data.metricValue(LEADER_BYTES_OUT) * _coefficients.getOrDefault(ModelCoefficient.LEADER_BYTES_OUT, 0.0)
-              + data.metricValue(REPLICATION_BYTES_IN_RATE) * _coefficients.get(ModelCoefficient.FOLLOWER_BYTES_IN);
+        if (!COEFFICIENTS.isEmpty()) {
+          Double estimatedCpu = data.metricValue(LEADER_BYTES_IN) * COEFFICIENTS.get(ModelCoefficient.LEADER_BYTES_IN)
+              + data.metricValue(LEADER_BYTES_OUT) * COEFFICIENTS.getOrDefault(ModelCoefficient.LEADER_BYTES_OUT, 0.0)
+              + data.metricValue(REPLICATION_BYTES_IN_RATE) * COEFFICIENTS.get(ModelCoefficient.FOLLOWER_BYTES_IN);
           int error = estimatedCpu.intValue() - data.metricValue(CPU_USAGE).intValue();
           count = CPU_UTIL_ESTIMATION_ERROR_STATS.getOrDefault(error, 0);
           CPU_UTIL_ESTIMATION_ERROR_STATS.put(error, count + 1);
@@ -150,18 +150,18 @@ public class LinearRegressionModelParameters {
       LOG.debug("Linear regression model training data indices: {}", INDICES);
     }
     PriorityQueue<Integer> mostFilledBuckets =
-        new PriorityQueue<>(MIN_CPU_UTIL_OBSERVATION_BUCKETS);
+        new PriorityQueue<>(minCpuUtilObservationBuckets);
     for (AtomicInteger index : INDICES.values()) {
       mostFilledBuckets.add(index.get());
-      if (mostFilledBuckets.size() > MIN_CPU_UTIL_OBSERVATION_BUCKETS) {
+      if (mostFilledBuckets.size() > minCpuUtilObservationBuckets) {
         mostFilledBuckets.remove();
       }
     }
 
     double completeness = 0.0;
     for (Integer index : mostFilledBuckets) {
-      completeness += ((double) Math.min(index, NUM_OBSERVATIONS_PER_UTIL_BUCKET)) / NUM_OBSERVATIONS_PER_UTIL_BUCKET
-          / MIN_CPU_UTIL_OBSERVATION_BUCKETS;
+      completeness += ((double) Math.min(index, numObservationsPerUtilBucket)) / numObservationsPerUtilBucket
+                      / minCpuUtilObservationBuckets;
     }
     return completeness;
   }
@@ -169,15 +169,16 @@ public class LinearRegressionModelParameters {
   /**
    * @return Linear regression model state.
    */
+  @Nonnull
   public synchronized LinearRegressionModelState modelState() {
     Map<Integer, Double> detailCompleteness = new HashMap<>();
     for (Map.Entry<Integer, AtomicInteger> entry : INDICES.entrySet()) {
       detailCompleteness.put(entry.getKey(),
-                             Math.min((double) entry.getValue().get() / NUM_OBSERVATIONS_PER_UTIL_BUCKET, 1.0));
+                             Math.min((double) entry.getValue().get() / numObservationsPerUtilBucket, 1.0));
     }
     Map<Integer, Integer> usedLeaderToFollowerRatio = new HashMap<>();
     Map<Integer, Integer> usedLeaderBytesInToBytesOutRatio = new HashMap<>();
-    Map<ModelCoefficient, Double> coefficientFromAvailableData = new HashMap<>(_coefficients);
+    Map<ModelCoefficient, Double> coefficientFromAvailableData = new HashMap<>(COEFFICIENTS);
     OLSMultipleLinearRegression regression = new OLSMultipleLinearRegression();
     regression.setNoIntercept(true);
     boolean ignoreLeaderBytesOutRate = !isLeaderBytesInAndOutRatioDiverseEnough();
@@ -186,15 +187,15 @@ public class LinearRegressionModelParameters {
     int leaderBytesInIndex = 0;
     int leaderBytesOutIndex = 1;
     int followerBytesInIndex = ignoreLeaderBytesOutRate ? 1 : 2;
-    for (int i = 0; i < sampleBytesRateData.length; i++) {
-      int leaderToFollowerRatio = sampleBytesRateData[i][followerBytesInIndex] == 0.0 ? 10000000 :
-          (int) ((sampleBytesRateData[i][leaderBytesInIndex] / sampleBytesRateData[i][followerBytesInIndex]) * 10);
+    for (double[] sampleBytesRateDatum : sampleBytesRateData) {
+      int leaderToFollowerRatio = sampleBytesRateDatum[followerBytesInIndex] == 0.0 ? 10000000 : (int) (
+          (sampleBytesRateDatum[leaderBytesInIndex] / sampleBytesRateDatum[followerBytesInIndex]) * 10);
       int count = usedLeaderToFollowerRatio.getOrDefault(leaderToFollowerRatio, 0);
       usedLeaderToFollowerRatio.put(leaderToFollowerRatio, count + 1);
 
       if (!ignoreLeaderBytesOutRate) {
-        int leaderBytesInToBytesOutRatio = sampleBytesRateData[i][leaderBytesOutIndex] == 0.0 ? 10000000 :
-            (int) ((sampleBytesRateData[i][leaderBytesInIndex] / sampleBytesRateData[i][leaderBytesOutIndex]) * 10);
+        int leaderBytesInToBytesOutRatio = sampleBytesRateDatum[leaderBytesOutIndex] == 0.0 ? 10000000 : (int) (
+            (sampleBytesRateDatum[leaderBytesInIndex] / sampleBytesRateDatum[leaderBytesOutIndex]) * 10);
         count = usedLeaderBytesInToBytesOutRatio.getOrDefault(leaderBytesInToBytesOutRatio, 0);
         usedLeaderBytesInToBytesOutRatio.put(leaderBytesInToBytesOutRatio, count + 1);
       }
@@ -202,12 +203,10 @@ public class LinearRegressionModelParameters {
     regression.newSampleData(aggregateSampleCpuUtilData(), sampleBytesRateData);
     double[] parameters = regression.estimateRegressionParameters();
     coefficientFromAvailableData.put(ModelCoefficient.LEADER_BYTES_IN, parameters[leaderBytesInIndex]);
-    if (ignoreLeaderBytesOutRate) {
-      coefficientFromAvailableData.put(ModelCoefficient.FOLLOWER_BYTES_IN, parameters[followerBytesInIndex]);
-    } else {
+    if (!ignoreLeaderBytesOutRate) {
       coefficientFromAvailableData.put(ModelCoefficient.LEADER_BYTES_OUT, parameters[leaderBytesOutIndex]);
-      coefficientFromAvailableData.put(ModelCoefficient.FOLLOWER_BYTES_IN, parameters[followerBytesInIndex]);
     }
+    coefficientFromAvailableData.put(ModelCoefficient.FOLLOWER_BYTES_IN, parameters[followerBytesInIndex]);
     return new LinearRegressionModelState(detailCompleteness, coefficientFromAvailableData,
                                           OBSERVED_LEADER_TO_FOLLOWER_BYTES_RATIO,
                                           OBSERVED_LEADER_BYTES_IN_TO_BYTES_OUT_RATIO,
@@ -218,7 +217,7 @@ public class LinearRegressionModelParameters {
   private Set<Integer> validBuckets() {
     Set<Integer> validBuckets = new HashSet<>();
     for (Map.Entry<Integer, AtomicInteger> entry : INDICES.entrySet()) {
-      if (entry.getValue().get() >= NUM_OBSERVATIONS_PER_UTIL_BUCKET) {
+      if (entry.getValue().get() >= numObservationsPerUtilBucket) {
         validBuckets.add(entry.getKey());
       }
     }
@@ -232,11 +231,10 @@ public class LinearRegressionModelParameters {
     long totalSamples = 0;
     Map<Integer, Integer> leaderForFollowerRatioHist = new HashMap<>();
     for (Map.Entry<Integer, double[][]> entry : BYTE_RATE_OBSERVATIONS.entrySet()) {
-      int samplesInBucket = Math.min(NUM_OBSERVATIONS_PER_UTIL_BUCKET, INDICES.get(entry.getKey()).get());
+      int samplesInBucket = Math.min(numObservationsPerUtilBucket, INDICES.get(entry.getKey()).get());
       totalSamples += samplesInBucket;
       for (int i = 0; i < samplesInBucket; i++) {
-        int leaderBytesInToFollowerRatio = entry.getValue()[i][1] == 0.0 ? 10000000 :
-            (int) ((entry.getValue()[i][0] / entry.getValue()[i][1]) * 10);
+        int leaderBytesInToFollowerRatio = entry.getValue()[i][1] == 0.0 ? 10000000 : (int) ((entry.getValue()[i][0] / entry.getValue()[i][1]) * 10);
         int count = leaderForFollowerRatioHist.getOrDefault(leaderBytesInToFollowerRatio, 0);
         leaderForFollowerRatioHist.put(leaderBytesInToFollowerRatio, count + 1);
       }
@@ -258,7 +256,7 @@ public class LinearRegressionModelParameters {
     for (Map.Entry<Integer, double[][]> entry : BYTE_RATE_OBSERVATIONS.entrySet()) {
       int utilBucket = entry.getKey();
       double[][] sampleData = entry.getValue();
-      for (int i = 0; i < Math.min(NUM_OBSERVATIONS_PER_UTIL_BUCKET, INDICES.get(utilBucket).get()); i++) {
+      for (int i = 0; i < Math.min(numObservationsPerUtilBucket, INDICES.get(utilBucket).get()); i++) {
         if (ignoreLeaderBytesOutRate) {
           aggregatedSampleData[indexForAggregatedData] = new double[2];
           aggregatedSampleData[indexForAggregatedData][0] = sampleData[i][0];
@@ -278,7 +276,7 @@ public class LinearRegressionModelParameters {
     for (Map.Entry<Integer, double[]> entry : CPU_UTIL_OBSERVATIONS.entrySet()) {
       int utilBucket = entry.getKey();
       double[] sampleData = entry.getValue();
-      for (int i = 0; i < Math.min(NUM_OBSERVATIONS_PER_UTIL_BUCKET, INDICES.get(utilBucket).get()); i++) {
+      for (int i = 0; i < Math.min(numObservationsPerUtilBucket, INDICES.get(utilBucket).get()); i++) {
         aggregatedSampleData[indexForAggregatedData] = sampleData[i];
         indexForAggregatedData++;
       }
@@ -289,7 +287,7 @@ public class LinearRegressionModelParameters {
   private int numSamples() {
     int numSamples = 0;
     for (Integer utilBucket : CPU_UTIL_OBSERVATIONS.keySet()) {
-      numSamples += Math.min(NUM_OBSERVATIONS_PER_UTIL_BUCKET, INDICES.get(utilBucket).get());
+      numSamples += Math.min(numObservationsPerUtilBucket, INDICES.get(utilBucket).get());
     }
     return numSamples;
   }
@@ -332,8 +330,8 @@ public class LinearRegressionModelParameters {
       builder.append("TrainingState: \n{\n");
       for (Map.Entry<Integer, Double> entry : _trainingState.entrySet()) {
         builder.append(String.format("\t%3d%% - %3d%%: %.3f%n",
-                                     entry.getKey() * CPU_UTIL_BUCKET_SIZE,
-                                     Math.min((entry.getKey() + 1) * CPU_UTIL_BUCKET_SIZE, 100),
+                                     entry.getKey() * cpuUtilBucketSize,
+                                     Math.min((entry.getKey() + 1) * cpuUtilBucketSize, 100),
                                      entry.getValue()));
       }
       builder.append("}\n\n");

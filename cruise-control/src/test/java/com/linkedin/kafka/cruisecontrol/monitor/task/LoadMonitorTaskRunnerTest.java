@@ -6,18 +6,18 @@ package com.linkedin.kafka.cruisecontrol.monitor.task;
 
 import com.codahale.metrics.MetricRegistry;
 import com.linkedin.cruisecontrol.metricdef.MetricInfo;
-import com.linkedin.kafka.cruisecontrol.KafkaCruiseControlUtils;
 import com.linkedin.kafka.cruisecontrol.common.Resource;
 import com.linkedin.kafka.cruisecontrol.KafkaCruiseControlUnitTestUtils;
 import com.linkedin.cruisecontrol.metricdef.MetricDef;
 import com.linkedin.kafka.cruisecontrol.config.KafkaCruiseControlConfig;
 import com.linkedin.kafka.cruisecontrol.common.MetadataClient;
 import com.linkedin.kafka.cruisecontrol.config.constants.MonitorConfig;
-import com.linkedin.kafka.cruisecontrol.exception.MetricSamplingException;
+import com.linkedin.kafka.cruisecontrol.exception.SamplingException;
 import com.linkedin.kafka.cruisecontrol.metricsreporter.utils.CCKafkaIntegrationTestHarness;
 import com.linkedin.kafka.cruisecontrol.monitor.metricdefinition.KafkaMetricDef;
 import com.linkedin.kafka.cruisecontrol.monitor.sampling.MetricFetcherManager;
 import com.linkedin.kafka.cruisecontrol.monitor.sampling.MetricSampler;
+import com.linkedin.kafka.cruisecontrol.monitor.sampling.MetricSamplerOptions;
 import com.linkedin.kafka.cruisecontrol.monitor.sampling.NoopSampleStore;
 import com.linkedin.kafka.cruisecontrol.monitor.sampling.holder.PartitionMetricSample;
 import com.linkedin.kafka.cruisecontrol.monitor.sampling.aggregator.KafkaBrokerMetricSampleAggregator;
@@ -31,11 +31,13 @@ import java.util.Set;
 import java.util.concurrent.ArrayBlockingQueue;
 import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.Supplier;
-import kafka.admin.RackAwareMode;
-import kafka.zk.AdminZkClient;
-import kafka.zk.KafkaZkClient;
 import org.apache.kafka.clients.Metadata;
+import org.apache.kafka.clients.admin.AdminClient;
+import org.apache.kafka.clients.admin.CreateTopicsResult;
+import org.apache.kafka.clients.admin.NewTopic;
+import org.apache.kafka.clients.consumer.ConsumerConfig;
 import org.apache.kafka.common.Cluster;
 import org.apache.kafka.common.TopicPartition;
 import org.apache.kafka.common.internals.ClusterResourceListeners;
@@ -48,19 +50,22 @@ import org.junit.Test;
 
 import static com.linkedin.kafka.cruisecontrol.monitor.MonitorUnitTestUtils.METADATA_EXPIRY_MS;
 import static com.linkedin.kafka.cruisecontrol.monitor.MonitorUnitTestUtils.METADATA_REFRESH_BACKOFF;
+import static com.linkedin.kafka.cruisecontrol.monitor.MonitorUnitTestUtils.METADATA_REFRESH_BACKOFF_MAX;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertTrue;
+import static org.junit.Assert.assertNotNull;
 
 /**
  * The unit test for metric fetcher manager.
  */
 public class LoadMonitorTaskRunnerTest extends CCKafkaIntegrationTestHarness {
-  private static final long WINDOW_MS = 10000L;
+  private static final long WINDOW_MS = TimeUnit.SECONDS.toMillis(10);
   private static final int NUM_WINDOWS = 5;
   private static final int NUM_TOPICS = 100;
   private static final int NUM_PARTITIONS = 4;
-  private static final long SAMPLING_INTERVAL = 100000L;
+  private static final long SAMPLING_INTERVAL_MS = TimeUnit.SECONDS.toMillis(100);
   private static final MetricDef METRIC_DEF = KafkaMetricDef.commonMetricDef();
+  private static final String TOPIC_PREFIX = "topic-";
   // Using autoTick = 1
   private static final Time TIME = new MockTime(1L);
 
@@ -70,15 +75,22 @@ public class LoadMonitorTaskRunnerTest extends CCKafkaIntegrationTestHarness {
   @Before
   public void setUp() {
     super.setUp();
-    KafkaZkClient kafkaZkClient = KafkaCruiseControlUtils.createKafkaZkClient(zookeeper().connectionString(),
-                                                                              "LoadMonitorTaskRunnerGroup",
-                                                                              "LoadMonitorTaskRunnerSetup",
-                                                                              false);
-    AdminZkClient adminZkClient = new AdminZkClient(kafkaZkClient);
+    Properties adminProps = new Properties();
+    adminProps.setProperty(ConsumerConfig.BOOTSTRAP_SERVERS_CONFIG, bootstrapServers());
+    AdminClient adminClient = AdminClient.create(adminProps);
+    Set<NewTopic> newTopics = new HashSet<>();
     for (int i = 0; i < NUM_TOPICS; i++) {
-      adminZkClient.createTopic("topic-" + i, NUM_PARTITIONS, 1, new Properties(), RackAwareMode.Safe$.MODULE$);
+      newTopics.add(new NewTopic(TOPIC_PREFIX + i, NUM_PARTITIONS, (short) 1));
     }
-    KafkaCruiseControlUtils.closeKafkaZkClientWithTimeout(kafkaZkClient);
+    CreateTopicsResult createTopicsResult = adminClient.createTopics(newTopics);
+
+    AtomicInteger adminFailed = new AtomicInteger(0);
+    createTopicsResult.all().whenComplete((v, e) -> {
+      if (e != null) {
+        adminFailed.incrementAndGet();
+      }
+    });
+    assertEquals(0, adminFailed.get());
   }
 
   @After
@@ -95,10 +107,12 @@ public class LoadMonitorTaskRunnerTest extends CCKafkaIntegrationTestHarness {
   public void testSimpleFetch() throws InterruptedException {
     KafkaCruiseControlConfig config = new KafkaCruiseControlConfig(getLoadMonitorProperties());
     Metadata metadata = new Metadata(METADATA_REFRESH_BACKOFF,
+                                     METADATA_REFRESH_BACKOFF_MAX,
                                      METADATA_EXPIRY_MS,
                                      new LogContext(),
                                      new ClusterResourceListeners());
     MetadataClient metadataClient = new MetadataClient(config, metadata, -1L, TIME);
+    assertNotNull(metadataClient.cluster().clusterResource().clusterId());
     MockPartitionMetricSampleAggregator mockPartitionMetricSampleAggregator =
         new MockPartitionMetricSampleAggregator(config, metadata);
     KafkaBrokerMetricSampleAggregator mockBrokerMetricSampleAggregator =
@@ -110,17 +124,17 @@ public class LoadMonitorTaskRunnerTest extends CCKafkaIntegrationTestHarness {
                                  metadataClient, METRIC_DEF, TIME, dropwizardMetricRegistry, null, sampler);
     LoadMonitorTaskRunner loadMonitorTaskRunner =
         new LoadMonitorTaskRunner(config, fetcherManager, mockPartitionMetricSampleAggregator,
-                                  mockBrokerMetricSampleAggregator, metadataClient, null, TIME);
+                                  mockBrokerMetricSampleAggregator, metadataClient, TIME);
     while (metadata.fetch().topics().size() < NUM_TOPICS) {
       Thread.sleep(10);
       metadataClient.refreshMetadata();
     }
     loadMonitorTaskRunner.start(true);
 
-    Set<TopicPartition> partitionsToSample = new HashSet<>(NUM_TOPICS * NUM_PARTITIONS);
+    Set<TopicPartition> partitionsToSample = new HashSet<>();
     for (int i = 0; i < NUM_TOPICS; i++) {
       for (int j = 0; j < NUM_PARTITIONS; j++) {
-        partitionsToSample.add(new TopicPartition("topic-" + i, j));
+        partitionsToSample.add(new TopicPartition(TOPIC_PREFIX + i, j));
       }
     }
 
@@ -144,10 +158,12 @@ public class LoadMonitorTaskRunnerTest extends CCKafkaIntegrationTestHarness {
   public void testSamplingError() {
     KafkaCruiseControlConfig config = new KafkaCruiseControlConfig(getLoadMonitorProperties());
     Metadata metadata = new Metadata(METADATA_REFRESH_BACKOFF,
+                                     METADATA_REFRESH_BACKOFF_MAX,
                                      METADATA_EXPIRY_MS,
                                      new LogContext(),
                                      new ClusterResourceListeners());
     MetadataClient metadataClient = new MetadataClient(config, metadata, -1L, TIME);
+    assertNotNull(metadataClient.cluster().clusterResource().clusterId());
     MockPartitionMetricSampleAggregator mockMetricSampleAggregator =
         new MockPartitionMetricSampleAggregator(config, metadata);
     KafkaBrokerMetricSampleAggregator mockBrokerMetricSampleAggregator =
@@ -159,7 +175,7 @@ public class LoadMonitorTaskRunnerTest extends CCKafkaIntegrationTestHarness {
                                  METRIC_DEF, TIME, dropwizardMetricRegistry, null, sampler);
     LoadMonitorTaskRunner loadMonitorTaskRunner =
         new LoadMonitorTaskRunner(config, fetcherManager, mockMetricSampleAggregator, mockBrokerMetricSampleAggregator,
-                                  metadataClient, null, TIME);
+                                  metadataClient, TIME);
     while (metadata.fetch().topics().size() < 100) {
       metadataClient.refreshMetadata();
     }
@@ -188,13 +204,14 @@ public class LoadMonitorTaskRunnerTest extends CCKafkaIntegrationTestHarness {
     // The configuration does not matter here, we pass in the fetcher explicitly.
     props.setProperty(MonitorConfig.METRIC_SAMPLER_CLASS_CONFIG, MockSampler.class.getName());
     props.setProperty(MonitorConfig.MIN_SAMPLES_PER_PARTITION_METRICS_WINDOW_CONFIG, "2");
-    props.setProperty(MonitorConfig.METRIC_SAMPLING_INTERVAL_MS_CONFIG, Long.toString(SAMPLING_INTERVAL));
+    props.setProperty(MonitorConfig.METRIC_SAMPLING_INTERVAL_MS_CONFIG, Long.toString(SAMPLING_INTERVAL_MS));
     props.setProperty(MonitorConfig.SAMPLE_STORE_CLASS_CONFIG, NoopSampleStore.class.getName());
+    props.setProperty(MonitorConfig.SAMPLE_PARTITION_METRIC_STORE_ON_EXECUTION_CLASS_CONFIG, NoopSampleStore.class.getName());
     return props;
   }
 
   // A simple metric sampler that increment the mock time by 1
-  private class MockSampler implements MetricSampler {
+  private static class MockSampler implements MetricSampler {
     private int _exceptionsLeft;
 
     MockSampler(int numExceptions) {
@@ -208,15 +225,21 @@ public class LoadMonitorTaskRunnerTest extends CCKafkaIntegrationTestHarness {
                               long endTime,
                               SamplingMode mode,
                               MetricDef metricDef,
-                              long timeout) throws MetricSamplingException {
+                              long timeoutMs) throws SamplingException {
+      return getSamples(
+          new MetricSamplerOptions(cluster, assignedPartitions, startTime, endTime, mode, metricDef, timeoutMs));
+    }
 
+    @Override
+    public Samples getSamples(MetricSamplerOptions metricSamplerOptions) throws SamplingException {
       if (_exceptionsLeft > 0) {
         _exceptionsLeft--;
-        throw new MetricSamplingException("Error");
+        throw new SamplingException("Error");
       }
-      Set<PartitionMetricSample> partitionMetricSamples = new HashSet<>(assignedPartitions.size());
-      for (TopicPartition tp : assignedPartitions) {
-        PartitionMetricSample sample = new PartitionMetricSample(cluster.partition(tp).leader().id(), tp);
+      Set<PartitionMetricSample> partitionMetricSamples = new HashSet<>();
+      for (TopicPartition tp : metricSamplerOptions.assignedPartitions()) {
+        PartitionMetricSample sample = new PartitionMetricSample(
+            metricSamplerOptions.cluster().partition(tp).leader().id(), tp);
         long now = TIME.milliseconds();
         for (Resource resource : Resource.cachedValues()) {
           for (MetricInfo metricInfo : KafkaMetricDef.resourceToMetricInfo(resource)) {
@@ -248,7 +271,7 @@ public class LoadMonitorTaskRunnerTest extends CCKafkaIntegrationTestHarness {
     private long _nanos;
     private final long _autoTickMs;
 
-    public MockTime(long autoTickMs) {
+    MockTime(long autoTickMs) {
       _nanos = 0;
       _autoTickMs = autoTickMs;
     }
@@ -276,7 +299,7 @@ public class LoadMonitorTaskRunnerTest extends CCKafkaIntegrationTestHarness {
     }
 
     @Override
-    public void waitObject(Object obj, Supplier<Boolean> condition, long timeoutMs) throws InterruptedException {
+    public void waitObject(Object obj, Supplier<Boolean> condition, long timeoutMs) {
       // Noop
     }
   }
@@ -308,7 +331,5 @@ public class LoadMonitorTaskRunnerTest extends CCKafkaIntegrationTestHarness {
     public BlockingQueue<PartitionMetricSample> metricSampleQueue() {
       return _partitionMetricSamples;
     }
-
-
   }
 }

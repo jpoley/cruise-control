@@ -11,8 +11,8 @@ import com.linkedin.kafka.cruisecontrol.config.KafkaCruiseControlConfig;
 import com.linkedin.kafka.cruisecontrol.common.KafkaCruiseControlThreadFactory;
 import com.linkedin.kafka.cruisecontrol.common.MetadataClient;
 import com.linkedin.kafka.cruisecontrol.config.constants.MonitorConfig;
-import com.linkedin.kafka.cruisecontrol.executor.Executor;
 import com.linkedin.kafka.cruisecontrol.monitor.sampling.MetricFetcherManager;
+import com.linkedin.kafka.cruisecontrol.monitor.sampling.MetricSampler;
 import com.linkedin.kafka.cruisecontrol.monitor.sampling.SampleStore;
 import com.linkedin.kafka.cruisecontrol.monitor.sampling.aggregator.KafkaBrokerMetricSampleAggregator;
 import com.linkedin.kafka.cruisecontrol.monitor.sampling.aggregator.KafkaPartitionMetricSampleAggregator;
@@ -32,13 +32,14 @@ import static com.linkedin.kafka.cruisecontrol.monitor.task.LoadMonitorTaskRunne
  */
 public class LoadMonitorTaskRunner {
   private static final Logger LOG = LoggerFactory.getLogger(LoadMonitorTaskRunner.class);
-
+  public static final MetricSampler.SamplingMode DEFAULT_SAMPLING_MODE = MetricSampler.SamplingMode.ALL;
   private final Time _time;
   private final MetricFetcherManager _metricFetcherManager;
   private final KafkaPartitionMetricSampleAggregator _partitionMetricSampleAggregator;
   private final KafkaBrokerMetricSampleAggregator _brokerMetricSampleAggregator;
   private final MetadataClient _metadataClient;
   private final SampleStore _sampleStore;
+  private final SampleStore _sampleStoreForPartitionMetricOnExecution;
   private final ScheduledExecutorService _samplingScheduler;
   private final long _samplingIntervalMs;
   // The following two configuration is actually for MetricSampleAggregator, the MetricFetcherManager uses it to
@@ -46,12 +47,12 @@ public class LoadMonitorTaskRunner {
   private final int _configuredNumWindows;
   private final long _configuredWindowMs;
 
-  private AtomicReference<LoadMonitorTaskRunnerState> _state;
+  private final AtomicReference<LoadMonitorTaskRunnerState> _state;
   private volatile double _bootstrapProgress;
   private volatile boolean _awaitingPauseSampling;
   // The reason for pausing or resuming metric sampling.
   private volatile String _reasonOfLatestPauseOrResume;
-  private final Executor _executor;
+  private volatile MetricSampler.SamplingMode _samplingMode;
 
   public enum LoadMonitorTaskRunnerState {
     NOT_STARTED, RUNNING, PAUSED, SAMPLING, BOOTSTRAPPING, TRAINING, LOADING
@@ -68,7 +69,6 @@ public class LoadMonitorTaskRunner {
    * @param time The time object.
    * @param dropwizardMetricRegistry The metric registry that holds all the metrics for monitoring Cruise Control.
    * @param brokerCapacityConfigResolver The resolver for retrieving broker capacities.
-   * @param executor The proposal executor.
    */
   public LoadMonitorTaskRunner(KafkaCruiseControlConfig config,
                                KafkaPartitionMetricSampleAggregator partitionMetricSampleAggregator,
@@ -77,15 +77,13 @@ public class LoadMonitorTaskRunner {
                                MetricDef metricDef,
                                Time time,
                                MetricRegistry dropwizardMetricRegistry,
-                               BrokerCapacityConfigResolver brokerCapacityConfigResolver,
-                               Executor executor) {
+                               BrokerCapacityConfigResolver brokerCapacityConfigResolver) {
     this(config,
         new MetricFetcherManager(config, partitionMetricSampleAggregator, brokerMetricSampleAggregator, metadataClient,
                                  metricDef, time, dropwizardMetricRegistry, brokerCapacityConfigResolver),
         partitionMetricSampleAggregator,
         brokerMetricSampleAggregator,
         metadataClient,
-        executor,
         time);
   }
 
@@ -97,7 +95,6 @@ public class LoadMonitorTaskRunner {
    * @param partitionMetricSampleAggregator The {@link KafkaPartitionMetricSampleAggregator} to aggregate partition metrics.
    * @param brokerMetricSampleAggregator The {@link KafkaBrokerMetricSampleAggregator} to aggregate broker metrics.
    * @param metadataClient The metadata of the cluster.
-   * @param executor The proposal executor.
    * @param time The time object.
    */
   LoadMonitorTaskRunner(KafkaCruiseControlConfig config,
@@ -105,15 +102,15 @@ public class LoadMonitorTaskRunner {
                         KafkaPartitionMetricSampleAggregator partitionMetricSampleAggregator,
                         KafkaBrokerMetricSampleAggregator brokerMetricSampleAggregator,
                         MetadataClient metadataClient,
-                        Executor executor,
                         Time time) {
     _time = time;
-    _executor = executor;
     _metricFetcherManager = metricFetcherManager;
     _partitionMetricSampleAggregator = partitionMetricSampleAggregator;
     _brokerMetricSampleAggregator = brokerMetricSampleAggregator;
     _metadataClient = metadataClient;
     _sampleStore = config.getConfiguredInstance(MonitorConfig.SAMPLE_STORE_CLASS_CONFIG, SampleStore.class);
+    _sampleStoreForPartitionMetricOnExecution =
+        config.getConfiguredInstance(MonitorConfig.SAMPLE_PARTITION_METRIC_STORE_ON_EXECUTION_CLASS_CONFIG, SampleStore.class);
     long samplingIntervalMs = config.getLong(MonitorConfig.METRIC_SAMPLING_INTERVAL_MS_CONFIG);
 
     _samplingScheduler =
@@ -126,6 +123,7 @@ public class LoadMonitorTaskRunner {
     _bootstrapProgress = -1.0;
     _awaitingPauseSampling = false;
     _reasonOfLatestPauseOrResume = null;
+    _samplingMode = DEFAULT_SAMPLING_MODE;
   }
 
   /**
@@ -139,7 +137,7 @@ public class LoadMonitorTaskRunner {
   public void bootstrap(long startMs, long endMs, boolean clearMetrics) {
 
     if (_state.compareAndSet(RUNNING, BOOTSTRAPPING)) {
-      _samplingScheduler.submit(new BootstrapTask(startMs, endMs, clearMetrics, _metadataClient,
+      _samplingScheduler.execute(new BootstrapTask(startMs, endMs, clearMetrics, _metadataClient,
           _partitionMetricSampleAggregator,
                                                   this, _metricFetcherManager, _sampleStore, _configuredNumWindows,
                                                   _configuredWindowMs, _samplingIntervalMs, _time));
@@ -158,7 +156,7 @@ public class LoadMonitorTaskRunner {
   public void bootstrap(long startMs, boolean clearMetrics) {
 
     if (_state.compareAndSet(RUNNING, BOOTSTRAPPING)) {
-      _samplingScheduler.submit(new BootstrapTask(startMs, clearMetrics, _metadataClient,
+      _samplingScheduler.execute(new BootstrapTask(startMs, clearMetrics, _metadataClient,
           _partitionMetricSampleAggregator,
                                                   this, _metricFetcherManager, _sampleStore, _configuredNumWindows,
                                                   _configuredWindowMs, _samplingIntervalMs, _time));
@@ -175,7 +173,7 @@ public class LoadMonitorTaskRunner {
    */
   public void bootstrap(boolean clearMetrics) {
     if (_state.compareAndSet(RUNNING, BOOTSTRAPPING)) {
-      _samplingScheduler.submit(new BootstrapTask(clearMetrics, _metadataClient, _partitionMetricSampleAggregator,
+      _samplingScheduler.execute(new BootstrapTask(clearMetrics, _metadataClient, _partitionMetricSampleAggregator,
                                                   this, _metricFetcherManager, _sampleStore, _configuredNumWindows,
                                                   _configuredWindowMs, _samplingIntervalMs, _time));
     } else {
@@ -195,11 +193,10 @@ public class LoadMonitorTaskRunner {
    */
   private void loadSamples() {
     if (_state.compareAndSet(RUNNING, LOADING)) {
-      _samplingScheduler.submit(new SampleLoadingTask(_sampleStore,
+      _samplingScheduler.execute(new SampleLoadingTask(_sampleStore,
                                                       _partitionMetricSampleAggregator,
                                                       _brokerMetricSampleAggregator,
-                                                      this,
-                                                      _executor));
+                                                      this));
     } else {
       throw new IllegalStateException("Cannot load samples because the load monitor is in "
                                           + _state.get() + " state.");
@@ -217,7 +214,7 @@ public class LoadMonitorTaskRunner {
    */
   public void train(long startMs, long endMs) {
     if (_state.compareAndSet(RUNNING, TRAINING)) {
-      _samplingScheduler.submit(new TrainingTask(_time, this, _metricFetcherManager, _sampleStore,
+      _samplingScheduler.execute(new TrainingTask(_time, this, _metricFetcherManager, _sampleStore,
                                                  _configuredWindowMs, _samplingIntervalMs, startMs, endMs));
     } else {
       throw new IllegalStateException("Cannot start model training because the load monitor is in "
@@ -246,7 +243,8 @@ public class LoadMonitorTaskRunner {
       loadSamples();
     }
     _samplingScheduler.scheduleAtFixedRate(new SamplingTask(_samplingIntervalMs, _metadataClient,
-                                                            this, _metricFetcherManager, _sampleStore, _time),
+                                                            this, _metricFetcherManager, _sampleStore,
+                                                            _sampleStoreForPartitionMetricOnExecution, _time),
                                            0L,
                                            _samplingIntervalMs,
                                            TimeUnit.MILLISECONDS);
@@ -268,7 +266,11 @@ public class LoadMonitorTaskRunner {
       LOG.warn("Interrupted while waiting for metric fetcher manager to shutdown.");
     }
     _metricFetcherManager.shutdown();
-    _sampleStore.close();
+    try {
+      _sampleStore.close();
+    } catch (Exception e) {
+      LOG.warn("Received exception when closing sample store.", e);
+    }
     LOG.info("Load monitor task runner shutdown completed.");
   }
 
@@ -277,14 +279,16 @@ public class LoadMonitorTaskRunner {
    * Note if load monitor is still in loading state, the method will be a noop.
    *
    * @param reason The reason for pausing metric sampling.
+   * @param forcePauseSampling {@code true} to block metric sampler from starting another {@link LoadMonitorTaskRunnerState#SAMPLING}
+   * in case this pause request fails.
    */
-  public synchronized void pauseSampling(String reason) {
+  public synchronized void pauseSampling(String reason, boolean forcePauseSampling) {
     if (_state.get() == LOADING) {
       LOG.info("Skip pause sampling since load monitor is in loading state");
       return;
     }
     if (_state.get() != PAUSED && !_state.compareAndSet(RUNNING, PAUSED)) {
-      _awaitingPauseSampling = true;
+      _awaitingPauseSampling = forcePauseSampling;
       throw new IllegalStateException("Cannot pause the load monitor because it is in " + _state.get() + " state.");
     } else {
       _awaitingPauseSampling = false;
@@ -322,10 +326,25 @@ public class LoadMonitorTaskRunner {
 
   /**
    * Allow tasks to know if another thread, e.g. executor, is waiting on sampling to pause.
-   * @return True if another thread is waiting on sampling to pause, false otherwise.
+   * @return {@code true} if another thread is waiting on sampling to pause, {@code false} otherwise.
    */
   public boolean awaitingPauseSampling() {
     return _awaitingPauseSampling;
+  }
+
+  /**
+   * Set the mode of metric sampling that will take action on the next metric sampling.
+   * @param samplingMode Mode of metric sampling.
+   */
+  public void setSamplingMode(MetricSampler.SamplingMode samplingMode) {
+    _samplingMode = samplingMode;
+  }
+
+  /**
+   * @return The current mode of metric sampling.
+   */
+  public MetricSampler.SamplingMode samplingMode() {
+    return _samplingMode;
   }
 
   boolean compareAndSetState(LoadMonitorTaskRunnerState expectedState, LoadMonitorTaskRunnerState newState) {

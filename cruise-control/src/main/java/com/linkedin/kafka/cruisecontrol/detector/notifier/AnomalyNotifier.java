@@ -10,10 +10,15 @@ import com.linkedin.kafka.cruisecontrol.detector.BrokerFailures;
 import com.linkedin.kafka.cruisecontrol.detector.DiskFailures;
 import com.linkedin.kafka.cruisecontrol.detector.GoalViolations;
 import com.linkedin.kafka.cruisecontrol.detector.KafkaMetricAnomaly;
+import com.linkedin.kafka.cruisecontrol.detector.MaintenanceEvent;
+import com.linkedin.kafka.cruisecontrol.detector.TopicAnomaly;
 import java.util.Map;
 import org.apache.kafka.common.annotation.InterfaceStability;
 
 
+/**
+ * An interface to handle notifications corresponding to different anomalies and their self-healing status.
+ */
 @InterfaceStability.Evolving
 public interface AnomalyNotifier extends CruiseControlConfigurable {
 
@@ -45,6 +50,24 @@ public interface AnomalyNotifier extends CruiseControlConfigurable {
   AnomalyNotificationResult onMetricAnomaly(KafkaMetricAnomaly metricAnomaly);
 
   /**
+   * This method is called when a topic anomaly is detected.
+   *
+   * @param topicAnomaly the detected topic anomaly.
+   * @return The notification result that asks Cruise Control to perform a particular
+   * {@link com.linkedin.kafka.cruisecontrol.detector.notifier.AnomalyNotificationResult.Action}.
+   */
+  AnomalyNotificationResult onTopicAnomaly(TopicAnomaly topicAnomaly);
+
+  /**
+   * This method is called when a maintenance event is detected.
+   *
+   * @param maintenanceEvent the detected maintenance event.
+   * @return The notification result that asks Cruise Control to perform a particular
+   * {@link com.linkedin.kafka.cruisecontrol.detector.notifier.AnomalyNotificationResult.Action}.
+   */
+  AnomalyNotificationResult onMaintenanceEvent(MaintenanceEvent maintenanceEvent);
+
+  /**
    * This method is called when a disk failure is detected.
    *
    * @param diskFailures the detected disk failures.
@@ -64,7 +87,7 @@ public interface AnomalyNotifier extends CruiseControlConfigurable {
    * Enable or disable self healing for the given anomaly type.
    *
    * @param anomalyType Type of anomaly for which to enable or disable self healing.
-   * @param isSelfHealingEnabled True if self healing is enabled, false otherwise.
+   * @param isSelfHealingEnabled {@code true} if self healing is enabled, {@code false} otherwise.
    * @return The old value of self healing for the given anomaly type.
    */
   boolean setSelfHealingFor(AnomalyType anomalyType, boolean isSelfHealingEnabled);

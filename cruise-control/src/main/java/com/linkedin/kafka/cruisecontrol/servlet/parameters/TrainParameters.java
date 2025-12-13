@@ -24,7 +24,7 @@ import static com.linkedin.kafka.cruisecontrol.servlet.parameters.ParameterUtils
  * {@link com.linkedin.kafka.cruisecontrol.config.constants.MonitorConfig#USE_LINEAR_REGRESSION_MODEL_CONFIG} is true.
  *
  *    GET /kafkacruisecontrol/train?start=[START_TIMESTAMP]&amp;end=[END_TIMESTAMP]&amp;json=[true/false]
- *    &amp;get_response_schema=[true/false]
+ *    &amp;get_response_schema=[true/false]&amp;doAs=[user]
  * </pre>
  */
 public class TrainParameters extends AbstractParameters {
@@ -46,11 +46,12 @@ public class TrainParameters extends AbstractParameters {
   @Override
   protected void initParameters() throws UnsupportedEncodingException {
     super.initParameters();
-    _startMs = ParameterUtils.startMs(_request);
-    _endMs = ParameterUtils.endMs(_request);
+    _startMs = ParameterUtils.startMsOrDefault(_requestContext, null);
+    _endMs = ParameterUtils.endMsOrDefault(_requestContext, null);
     if (_startMs == null || _endMs == null) {
       throw new UserRequestException("Missing start or end parameter.");
     }
+    ParameterUtils.validateTimeRange(_startMs, _endMs);
   }
 
   public Long startMs() {

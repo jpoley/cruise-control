@@ -4,13 +4,12 @@
 
 package com.linkedin.kafka.cruisecontrol.analyzer;
 
-import com.linkedin.kafka.cruisecontrol.common.Resource;
 import com.linkedin.kafka.cruisecontrol.analyzer.goals.Goal;
+import com.linkedin.kafka.cruisecontrol.common.Resource;
 import com.linkedin.kafka.cruisecontrol.config.KafkaCruiseControlConfig;
 import com.linkedin.kafka.cruisecontrol.config.constants.AnalyzerConfig;
 import com.linkedin.kafka.cruisecontrol.executor.ExecutionProposal;
 import com.linkedin.kafka.cruisecontrol.model.ClusterModel;
-
 import com.linkedin.kafka.cruisecontrol.model.RawAndDerivedResource;
 import com.linkedin.kafka.cruisecontrol.model.Replica;
 import com.linkedin.kafka.cruisecontrol.model.ReplicaPlacementInfo;
@@ -19,7 +18,6 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.TreeMap;
-
 import org.apache.commons.math3.random.MersenneTwister;
 import org.apache.commons.math3.random.RandomGenerator;
 import org.apache.commons.math3.stat.inference.KolmogorovSmirnovTest;
@@ -31,9 +29,8 @@ import static com.linkedin.kafka.cruisecontrol.analyzer.ActionAcceptance.ACCEPT;
 /**
  * A util class for Analyzer.
  */
-public class AnalyzerUtils {
-  public final static double EPSILON = 1E-5;
-
+public final class AnalyzerUtils {
+  public static final double EPSILON = 1E-5;
   private AnalyzerUtils() {
 
   }
@@ -67,27 +64,15 @@ public class AnalyzerUtils {
                                                Map<TopicPartition, ReplicaPlacementInfo> initialLeaderDistribution,
                                                ClusterModel optimizedClusterModel,
                                                boolean skipReplicationFactorChangeCheck) {
-    Map<TopicPartition, List<ReplicaPlacementInfo>> finalDistribution = optimizedClusterModel.getReplicaDistribution();
-    // Sanity check to make sure that given distributions contain the same replicas.
-    if (!initialReplicaDistribution.keySet().equals(finalDistribution.keySet())) {
-      throw new IllegalArgumentException("Attempt to diff distributions with different partitions.");
-    }
-    if (!skipReplicationFactorChangeCheck) {
-      for (Map.Entry<TopicPartition, List<ReplicaPlacementInfo>> entry : initialReplicaDistribution.entrySet()) {
-        TopicPartition tp = entry.getKey();
-        List<ReplicaPlacementInfo> initialReplicas = entry.getValue();
-        if (finalDistribution.get(tp).size() != initialReplicas.size()) {
-          throw new IllegalArgumentException("Attempt to diff distributions with modified replication factor.");
-        }
-      }
-    }
+    Map<TopicPartition, List<ReplicaPlacementInfo>> finalReplicaDistribution = optimizedClusterModel.getReplicaDistribution();
+    sanityCheckReplicaDistribution(initialReplicaDistribution, finalReplicaDistribution, skipReplicationFactorChangeCheck);
 
     // Generate a set of execution proposals to represent the diff between initial and final distribution.
     Set<ExecutionProposal> diff = new HashSet<>();
     for (Map.Entry<TopicPartition, List<ReplicaPlacementInfo>> entry : initialReplicaDistribution.entrySet()) {
       TopicPartition tp = entry.getKey();
       List<ReplicaPlacementInfo> initialReplicas = entry.getValue();
-      List<ReplicaPlacementInfo> finalReplicas = finalDistribution.get(tp);
+      List<ReplicaPlacementInfo> finalReplicas = finalReplicaDistribution.get(tp);
       Replica finalLeader = optimizedClusterModel.partition(tp).leader();
       ReplicaPlacementInfo finalLeaderPlacementInfo = new ReplicaPlacementInfo(finalLeader.broker().id(),
                                                                                finalLeader.disk() == null ? null : finalLeader.disk().logDir());
@@ -101,10 +86,75 @@ public class AnalyzerUtils {
         finalReplicas.set(leaderPos, finalReplicas.get(0));
         finalReplicas.set(0, finalLeaderPlacementInfo);
       }
-      Double partitionSize = optimizedClusterModel.partition(tp).leader().load().expectedUtilizationFor(Resource.DISK);
-      diff.add(new ExecutionProposal(tp, partitionSize.intValue(), initialLeaderDistribution.get(tp), initialReplicas, finalReplicas));
+      double partitionSize = optimizedClusterModel.partition(tp).leader().load().expectedUtilizationFor(Resource.DISK);
+      diff.add(new ExecutionProposal(tp, (int) partitionSize, initialLeaderDistribution.get(tp), initialReplicas, finalReplicas));
     }
     return diff;
+  }
+
+  /**
+   * Sanity check to ensure that
+   * <ul>
+   *   <li>Initial and final replica distribution have exactly the same partitions.</li>
+   *   <li>(Optional) Replication factor of the initial and final replicas in distributions for each partition is the same.</li>
+   * </ul>
+   *
+   * @param initialReplicaDistribution Initial distribution of replicas over the cluster.
+   * @param finalReplicaDistribution The final distribution of replicas in the cluster at the point of call.
+   * @param skipReplicationFactorChangeCheck Whether skip sanity check of topic partition's replication factor change before
+   *                                         and after optimization.
+   */
+  private static void sanityCheckReplicaDistribution(Map<TopicPartition, List<ReplicaPlacementInfo>> initialReplicaDistribution,
+                                                     Map<TopicPartition, List<ReplicaPlacementInfo>> finalReplicaDistribution,
+                                                     boolean skipReplicationFactorChangeCheck) {
+    // Sanity check to make sure that given distributions contain the same replicas.
+    if (!initialReplicaDistribution.keySet().equals(finalReplicaDistribution.keySet())) {
+      throw new IllegalArgumentException("Attempt to diff distributions with different partitions.");
+    }
+    if (!skipReplicationFactorChangeCheck) {
+      initialReplicaDistribution.forEach((tp, initialReplicas) -> {
+        if (finalReplicaDistribution.get(tp).size() != initialReplicas.size()) {
+          throw new IllegalArgumentException("Attempt to diff distributions with modified replication factor.");
+        }
+      });
+    }
+  }
+
+  /**
+   * Get whether there is any diff represented by a set of balancing proposals to move from the initial to final distribution.
+   *
+   * @param initialReplicaDistribution Initial distribution of replicas over the cluster.
+   * @param initialLeaderDistribution Initial distribution of the leaders.
+   * @param optimizedClusterModel The optimized cluster model.
+   * @return The diff represented by the set of balancing proposals to move from initial to final distribution.
+   */
+  public static boolean hasDiff(Map<TopicPartition, List<ReplicaPlacementInfo>> initialReplicaDistribution,
+                                Map<TopicPartition, ReplicaPlacementInfo> initialLeaderDistribution,
+                                ClusterModel optimizedClusterModel) {
+    Map<TopicPartition, List<ReplicaPlacementInfo>> finalReplicaDistribution = optimizedClusterModel.getReplicaDistribution();
+    sanityCheckReplicaDistribution(initialReplicaDistribution, finalReplicaDistribution, false);
+
+    boolean hasDiff = false;
+    for (Map.Entry<TopicPartition, List<ReplicaPlacementInfo>> entry : initialReplicaDistribution.entrySet()) {
+      TopicPartition tp = entry.getKey();
+      List<ReplicaPlacementInfo> initialReplicas = entry.getValue();
+      List<ReplicaPlacementInfo> finalReplicas = finalReplicaDistribution.get(tp);
+
+      if (!finalReplicas.equals(initialReplicas)) {
+        hasDiff = true;
+        break;
+      } else {
+        Replica finalLeader = optimizedClusterModel.partition(tp).leader();
+        ReplicaPlacementInfo finalLeaderPlacementInfo = new ReplicaPlacementInfo(finalLeader.broker().id(),
+                                                                                 finalLeader.disk() == null ? null : finalLeader.disk().logDir());
+        if (!initialLeaderDistribution.get(tp).equals(finalLeaderPlacementInfo)) {
+          hasDiff = true;
+          break;
+        }
+        // The partition has no change.
+      }
+    }
+    return hasDiff;
   }
 
   /**
@@ -146,27 +196,32 @@ public class AnalyzerUtils {
    *
    * @param d1 The first {@code double} to compare.
    * @param d2 The second {@code double} to compare.
+   * @param epsilon Epsilon to be used in comparing doubles.
    * @return 1 if first &gt; second, -1 if first &lt; second, 0 otherwise.
    */
   public static int compare(double d1, double d2, double epsilon) {
     if (d2 - d1 > epsilon) {
-      return -1;  // Second value is larger than the first value.
+      // Second value is larger than the first value.
+      return -1;
     }
     if (d1 - d2 > epsilon) {
-      return 1;   // First value is larger than the second value.
+      // First value is larger than the second value.
+      return 1;
     }
     // Given values are approximately equal.
     return 0;
   }
 
   /**
+   * @param config The configurations for Cruise Control.
    * @return The list of default goals sorted by highest to lowest default priority.
    */
-  public static List<Goal> getGoalsByPriority(KafkaCruiseControlConfig config) {
+  public static List<Goal> getDefaultGoalsByPriority(KafkaCruiseControlConfig config) {
     return config.getConfiguredInstances(AnalyzerConfig.DEFAULT_GOALS_CONFIG, Goal.class);
   }
 
   /**
+   * @param config The configurations for Cruise Control.
    * @return A goal map with goal name as the keys.
    */
   public static Map<String, Goal> getCaseInsensitiveGoalsByName(KafkaCruiseControlConfig config) {

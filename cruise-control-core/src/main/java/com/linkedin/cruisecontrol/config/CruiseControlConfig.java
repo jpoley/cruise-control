@@ -21,23 +21,23 @@ public class CruiseControlConfig extends AbstractConfig {
    * <code>window.ms</code>
    */
   public static final String METRICS_WINDOW_MS_CONFIG = "metrics.window.ms";
-  private static final String METRICS_WINDOW_MS_DOC = "The interval in millisecond that is covered by each window." +
-      "Cruise control will aggregate all the metric samples whose timestamp fall into the same window. " +
-      "The metrics.window.ms must be greater than the metric.sampling.interval.ms.";
+  private static final String METRICS_WINDOW_MS_DOC = "The interval in millisecond that is covered by each window."
+      + " Cruise control will aggregate all the metric samples whose timestamp fall into the same window. "
+      + "The metrics.window.ms must be greater than the metric.sampling.interval.ms.";
 
   /**
    * <code>num.windows</code>
    */
   public static final String NUM_METRICS_WINDOWS_CONFIG = "num.metrics.windows";
-  private static final String NUM_METRICS_WINDOWS_DOC = "The maximum number of windows the load monitor would keep. " +
-      "Each window covers a time span defined by window.ms.";
+  private static final String NUM_METRICS_WINDOWS_DOC = "The maximum number of windows the load monitor would keep. "
+      + "Each window covers a time span defined by window.ms.";
 
   /**
    * <code>min.samples.per.window</code>
    */
   public static final String MIN_SAMPLES_PER_METRICS_WINDOW_CONFIG = "min.samples.per.metrics.window";
-  private static final String MIN_SAMPLES_PER_METRICS_WINDOW_DOC = "The minimum number of metric samples a valid " +
-      "window should have. If a partition does not have enough samples in a window, the entire group of the "
+  private static final String MIN_SAMPLES_PER_METRICS_WINDOW_DOC = "The minimum number of metric samples a valid "
+      + "window should have. If a partition does not have enough samples in a window, the entire group of the "
       + "entity will be removed from the aggregated metrics result due to insufficient data.";
 
   /**
@@ -63,7 +63,6 @@ public class CruiseControlConfig extends AbstractConfig {
   public static final String METRIC_ANOMALY_FINDER_METRICS_CONFIG = "metric.anomaly.analyzer.metrics";
   private static final String METRIC_ANOMALY_ANALYZER_METRICS_DOC = "The metric ids that the metric anomaly detector "
       + "should detect if they are violated.";
-
 
   static {
     CONFIG = new ConfigDef()
@@ -104,17 +103,6 @@ public class CruiseControlConfig extends AbstractConfig {
                 METRIC_ANOMALY_ANALYZER_METRICS_DOC);
   }
 
-  private static ConfigDef mergeConfigDef(ConfigDef definition) {
-    for (ConfigDef.ConfigKey configKey : definition.configKeys().values()) {
-      if (!CONFIG.configKeys().containsKey(configKey._name)) {
-        CONFIG.define(configKey._name, configKey._type, configKey._defaultValue, configKey._validator, configKey._importance,
-                      configKey._documentation, configKey._group, configKey._orderInGroup, configKey._width,
-                      configKey._displayName, configKey._dependents, configKey._recommender);
-      }
-    }
-    return CONFIG;
-  }
-
   public CruiseControlConfig(ConfigDef definition, Map<?, ?> originals, boolean doLog) {
     super(mergeConfigDef(definition), originals, doLog);
   }
@@ -125,5 +113,16 @@ public class CruiseControlConfig extends AbstractConfig {
 
   public CruiseControlConfig(Map<String, Object> parsedConfig) {
     super(CONFIG, parsedConfig);
+  }
+
+  private static ConfigDef mergeConfigDef(ConfigDef definition) {
+    for (ConfigDef.ConfigKey configKey : definition.configKeys().values()) {
+      if (!CONFIG.configKeys().containsKey(configKey.name())) {
+        CONFIG.define(configKey.name(), configKey.type(), configKey.defaultValue(), configKey.validator(), configKey.importance(),
+                      configKey.documentation(), configKey.group(), configKey.orderInGroup(), configKey.width(),
+                      configKey.displayName(), configKey.dependents(), configKey.recommender());
+      }
+    }
+    return CONFIG;
   }
 }

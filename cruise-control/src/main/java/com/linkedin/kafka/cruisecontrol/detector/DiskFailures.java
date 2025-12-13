@@ -10,9 +10,11 @@ import com.linkedin.kafka.cruisecontrol.config.KafkaCruiseControlConfig;
 import com.linkedin.kafka.cruisecontrol.exception.KafkaCruiseControlException;
 import com.linkedin.kafka.cruisecontrol.servlet.handler.async.runnable.FixOfflineReplicasRunnable;
 import com.linkedin.kafka.cruisecontrol.servlet.response.OptimizationResult;
+import java.util.Collections;
 import java.util.Map;
+import java.util.function.Supplier;
 
-import static com.linkedin.kafka.cruisecontrol.KafkaCruiseControlUtils.toDateString;
+import static com.linkedin.cruisecontrol.CruiseControlUtils.utcDateFor;
 import static com.linkedin.kafka.cruisecontrol.config.constants.AnomalyDetectorConfig.ANOMALY_DETECTION_ALLOW_CAPACITY_ESTIMATION_CONFIG;
 import static com.linkedin.kafka.cruisecontrol.config.constants.AnomalyDetectorConfig.SELF_HEALING_EXCLUDE_RECENTLY_DEMOTED_BROKERS_CONFIG;
 import static com.linkedin.kafka.cruisecontrol.config.constants.AnomalyDetectorConfig.SELF_HEALING_EXCLUDE_RECENTLY_REMOVED_BROKERS_CONFIG;
@@ -35,13 +37,13 @@ public class DiskFailures extends KafkaAnomaly {
    * @return The failed disks and their failure time in millisecond grouped by broker.
    */
   public Map<Integer, Map<String, Long>> failedDisks() {
-    return _failedDisksByBroker;
+    return Collections.unmodifiableMap(_failedDisksByBroker);
   }
 
   @Override
   public boolean fix() throws KafkaCruiseControlException {
     // Fix the cluster by moving replicas off the dead disks.
-    _optimizationResult = new OptimizationResult(_fixOfflineReplicasRunnable.fixOfflineReplicas(), null);
+    _optimizationResult = new OptimizationResult(_fixOfflineReplicasRunnable.computeResult(), null);
     boolean hasProposalsToFix = hasProposalsToFix();
     // Ensure that only the relevant response is cached to avoid memory pressure.
     _optimizationResult.discardIrrelevantAndCacheJsonAndPlaintext();
@@ -54,13 +56,16 @@ public class DiskFailures extends KafkaAnomaly {
   }
 
   @Override
+  public Supplier<String> reasonSupplier() {
+    return () -> String.format("Self healing for %s: %s", DISK_FAILURE, this);
+  }
+
+  @Override
   public String toString() {
     StringBuilder sb = new StringBuilder().append("{\n");
-    _failedDisksByBroker.forEach((brokerId, failures) -> {
-      failures.forEach((logdir, eventTime) -> {
-        sb.append(String.format("\tDisk %s on broker %d failed at %s\n ", logdir, brokerId, toDateString(eventTime)));
-      });
-    });
+    _failedDisksByBroker.forEach((brokerId, failures) -> failures.forEach((logdir, eventTime) -> {
+      sb.append(String.format("\tDisk %s on broker %d failed at %s%n ", logdir, brokerId, utcDateFor(eventTime)));
+    }));
     sb.append("}");
     return sb.toString();
   }
@@ -85,6 +90,7 @@ public class DiskFailures extends KafkaAnomaly {
                                                                  excludeRecentlyDemotedBrokers,
                                                                  excludeRecentlyRemovedBrokers,
                                                                  _anomalyId.toString(),
-                                                                 String.format("Self healing for %s: %s", DISK_FAILURE, this));
+                                                                 reasonSupplier(),
+                                                                 stopOngoingExecution());
   }
 }

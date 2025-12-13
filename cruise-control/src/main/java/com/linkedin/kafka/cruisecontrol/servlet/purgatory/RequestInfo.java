@@ -6,18 +6,15 @@ package com.linkedin.kafka.cruisecontrol.servlet.purgatory;
 
 import com.linkedin.cruisecontrol.servlet.EndPoint;
 import com.linkedin.cruisecontrol.servlet.parameters.CruiseControlParameters;
+import com.linkedin.cruisecontrol.http.CruiseControlRequestContext;
 import com.linkedin.kafka.cruisecontrol.servlet.parameters.ParameterUtils;
 import com.linkedin.kafka.cruisecontrol.servlet.response.JsonResponseClass;
 import com.linkedin.kafka.cruisecontrol.servlet.response.JsonResponseField;
-import java.util.Arrays;
 import java.util.Collections;
-import java.util.HashMap;
-import java.util.HashSet;
 import java.util.Map;
 import java.util.Set;
-import javax.servlet.http.HttpServletRequest;
 
-import static com.linkedin.kafka.cruisecontrol.servlet.KafkaCruiseControlServletUtils.getClientIpAddress;
+import static com.linkedin.kafka.cruisecontrol.servlet.KafkaCruiseControlServletUtils.queryWithParameters;
 import static com.linkedin.kafka.cruisecontrol.servlet.purgatory.ReviewStatus.*;
 
 
@@ -44,13 +41,9 @@ public class RequestInfo {
   public static final String REASON = "Reason";
   private static final String INIT_REASON = "Awaiting review.";
   private static final String FINAL_REASON = "Submitted approved request.";
-  private static final Map<ReviewStatus, Set<ReviewStatus>> VALID_TRANSFER = new HashMap<>();
-  static {
-    VALID_TRANSFER.put(PENDING_REVIEW, new HashSet<>(Arrays.asList(APPROVED, DISCARDED)));
-    VALID_TRANSFER.put(APPROVED, new HashSet<>(Arrays.asList(DISCARDED, SUBMITTED)));
-    VALID_TRANSFER.put(SUBMITTED, Collections.emptySet());
-    VALID_TRANSFER.put(DISCARDED, Collections.emptySet());
-  }
+  private static final Map<ReviewStatus, Set<ReviewStatus>> VALID_TRANSFER =
+      Map.of(PENDING_REVIEW, Set.of(APPROVED, DISCARDED), APPROVED, Set.of(DISCARDED, SUBMITTED),
+             SUBMITTED, Collections.emptySet(), DISCARDED, Collections.emptySet());
   private final String _submitterAddress;
   private final long _submissionTimeMs;
   private final Map<String, String[]> _parameterMap;
@@ -60,16 +53,16 @@ public class RequestInfo {
   private volatile String _reason;
   private volatile boolean _accessToAlreadySubmittedRequest;
 
-  public <P extends CruiseControlParameters> RequestInfo(HttpServletRequest request, P parameters) {
-    if (request == null) {
+  public <P extends CruiseControlParameters> RequestInfo(CruiseControlRequestContext requestContext, P parameters) {
+    if (requestContext == null) {
       throw new IllegalArgumentException("Request is missing from the request info.");
     } else if (parameters == null) {
       throw new IllegalArgumentException("Parameter is missing from the request info.");
     }
-    _submitterAddress = getClientIpAddress(request);
+    _submitterAddress = requestContext.getClientIdentity();
     _submissionTimeMs = System.currentTimeMillis();
-    _parameterMap = request.getParameterMap();
-    _endPoint = ParameterUtils.endPoint(request);
+    _parameterMap = requestContext.getParameterMap();
+    _endPoint = ParameterUtils.endPoint(requestContext);
     _parameters = parameters;
     _status = PENDING_REVIEW;
     _reason = INIT_REASON;
@@ -93,24 +86,14 @@ public class RequestInfo {
   }
 
   public Map<String, String[]> parameterMap() {
-    return _parameterMap;
+    return Collections.unmodifiableMap(_parameterMap);
   }
 
   /**
    * @return A String that combines the endpoint with parameters.
    */
   public String endpointWithParams() {
-    StringBuilder sb = new StringBuilder(_endPoint.toString());
-    String queryParamDelimiter = "?";
-    for (Map.Entry<String, String[]> paramSet : _parameterMap.entrySet()) {
-      for (String paramValue : paramSet.getValue()) {
-        sb.append(queryParamDelimiter).append(paramSet.getKey()).append("=").append(paramValue);
-        if (queryParamDelimiter.equals("?")) {
-          queryParamDelimiter = "&";
-        }
-      }
-    }
-    return  sb.toString();
+    return queryWithParameters(_endPoint.toString(), _parameterMap);
   }
 
   public EndPoint endPoint() {
@@ -158,7 +141,7 @@ public class RequestInfo {
    * Check if the status transfer is possible.
    *
    * @param targetStatus The status to transfer to.
-   * @return True if the transfer is valid, false otherwise.
+   * @return {@code true} if the transfer is valid, {@code false} otherwise.
    */
   private boolean canTransferToStatus(ReviewStatus targetStatus) {
     return VALID_TRANSFER.get(_status).contains(targetStatus);
@@ -176,13 +159,7 @@ public class RequestInfo {
    * @return An object that can be further used to encode into JSON.
    */
   public Map<String, Object> getJsonStructure(Integer reviewId) {
-    Map<String, Object> jsonMap = new HashMap<>(6);
-    jsonMap.put(ID, reviewId);
-    jsonMap.put(SUBMITTER_ADDRESS, _submitterAddress);
-    jsonMap.put(SUBMISSION_TIME_MS, _submissionTimeMs);
-    jsonMap.put(STATUS, _status.toString());
-    jsonMap.put(ENDPOINT_WITH_PARAMS, endpointWithParams());
-    jsonMap.put(REASON, _reason);
-    return jsonMap;
+    return Map.of(ID, reviewId, SUBMITTER_ADDRESS, _submitterAddress, SUBMISSION_TIME_MS, _submissionTimeMs,
+                  STATUS, _status.toString(), ENDPOINT_WITH_PARAMS, endpointWithParams(), REASON, _reason);
   }
 }

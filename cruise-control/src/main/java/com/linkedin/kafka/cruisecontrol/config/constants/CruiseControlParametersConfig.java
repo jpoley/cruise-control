@@ -4,25 +4,28 @@
 
 package com.linkedin.kafka.cruisecontrol.config.constants;
 
-import com.linkedin.kafka.cruisecontrol.servlet.parameters.AddBrokerParameters;
-import com.linkedin.kafka.cruisecontrol.servlet.parameters.AdminParameters;
-import com.linkedin.kafka.cruisecontrol.servlet.parameters.BootstrapParameters;
-import com.linkedin.kafka.cruisecontrol.servlet.parameters.ClusterLoadParameters;
-import com.linkedin.kafka.cruisecontrol.servlet.parameters.CruiseControlStateParameters;
-import com.linkedin.kafka.cruisecontrol.servlet.parameters.DemoteBrokerParameters;
-import com.linkedin.kafka.cruisecontrol.servlet.parameters.FixOfflineReplicasParameters;
-import com.linkedin.kafka.cruisecontrol.servlet.parameters.KafkaClusterStateParameters;
-import com.linkedin.kafka.cruisecontrol.servlet.parameters.PartitionLoadParameters;
+import com.linkedin.kafka.cruisecontrol.servlet.parameters.RemoveDisksParameters;
 import com.linkedin.kafka.cruisecontrol.servlet.parameters.PauseResumeParameters;
+import com.linkedin.kafka.cruisecontrol.servlet.parameters.StopProposalParameters;
+import com.linkedin.kafka.cruisecontrol.servlet.parameters.TrainParameters;
+import com.linkedin.kafka.cruisecontrol.servlet.parameters.ClusterLoadParameters;
+import com.linkedin.kafka.cruisecontrol.servlet.parameters.PartitionLoadParameters;
+import com.linkedin.kafka.cruisecontrol.servlet.parameters.BootstrapParameters;
 import com.linkedin.kafka.cruisecontrol.servlet.parameters.ProposalsParameters;
-import com.linkedin.kafka.cruisecontrol.servlet.parameters.RebalanceParameters;
-import com.linkedin.kafka.cruisecontrol.servlet.parameters.RemoveBrokerParameters;
+import com.linkedin.kafka.cruisecontrol.servlet.parameters.CruiseControlStateParameters;
+import com.linkedin.kafka.cruisecontrol.servlet.parameters.KafkaClusterStateParameters;
+import com.linkedin.kafka.cruisecontrol.servlet.parameters.UserTasksParameters;
 import com.linkedin.kafka.cruisecontrol.servlet.parameters.ReviewBoardParameters;
 import com.linkedin.kafka.cruisecontrol.servlet.parameters.ReviewParameters;
-import com.linkedin.kafka.cruisecontrol.servlet.parameters.StopProposalParameters;
+import com.linkedin.kafka.cruisecontrol.servlet.parameters.AddBrokerParameters;
+import com.linkedin.kafka.cruisecontrol.servlet.parameters.RemoveBrokerParameters;
+import com.linkedin.kafka.cruisecontrol.servlet.parameters.FixOfflineReplicasParameters;
+import com.linkedin.kafka.cruisecontrol.servlet.parameters.DemoteBrokerParameters;
+import com.linkedin.kafka.cruisecontrol.servlet.parameters.RebalanceParameters;
+import com.linkedin.kafka.cruisecontrol.servlet.parameters.AdminParameters;
 import com.linkedin.kafka.cruisecontrol.servlet.parameters.TopicConfigurationParameters;
-import com.linkedin.kafka.cruisecontrol.servlet.parameters.TrainParameters;
-import com.linkedin.kafka.cruisecontrol.servlet.parameters.UserTasksParameters;
+import com.linkedin.kafka.cruisecontrol.servlet.parameters.UserPermissionsParameters;
+import com.linkedin.kafka.cruisecontrol.servlet.parameters.RightsizeParameters;
 import org.apache.kafka.common.config.ConfigDef;
 
 
@@ -30,11 +33,8 @@ import org.apache.kafka.common.config.ConfigDef;
  * A class to keep Cruise Control Parameters Configs and defaults.
  * DO NOT CHANGE EXISTING CONFIG NAMES AS CHANGES WOULD BREAK USER CODE.
  */
-public class CruiseControlParametersConfig {
+public final class CruiseControlParametersConfig {
   public static final String DEFAULT_PAUSE_RESUME_PARAMETERS_CLASS = PauseResumeParameters.class.getName();
-  private CruiseControlParametersConfig() {
-
-  }
 
   /**
    * <code>stop.proposal.parameters.class</code>
@@ -175,6 +175,30 @@ public class CruiseControlParametersConfig {
   public static final String TOPIC_CONFIGURATION_PARAMETERS_CLASS_DOC = "The class for parameters of a topic configuration request.";
 
   /**
+   * <code>rightsize.parameters.class</code>
+   */
+  public static final String RIGHTSIZE_PARAMETERS_CLASS_CONFIG = "rightsize.parameters.class";
+  public static final String DEFAULT_RIGHTSIZE_PARAMETERS_CLASS = RightsizeParameters.class.getName();
+  public static final String RIGHTSIZE_PARAMETERS_CLASS_DOC = "The class for parameters of a provision rightsize request.";
+
+  /**
+   * <code>permissions.parameters.class</code>
+   */
+  public static final String PERMISSIONS_PARAMETERS_CLASS_CONFIG = "permissions.parameters.class";
+  public static final String DEFAULT_PERMISSIONS_PARAMETERS_CLASS = UserPermissionsParameters.class.getName();
+  public static final String PERMISSIONS_PARAMETERS_CLASS_DOC = "The class for parameters of user permissons request.";
+  
+  /**
+   * <code>remove.disks.parameters.class</code>
+   */
+  public static final String REMOVE_DISKS_PARAMETERS_CLASS_CONFIG = "remove.disks.parameters.class";
+  public static final String DEFAULT_REMOVE_DISKS_PARAMETERS_CLASS = RemoveDisksParameters.class.getName();
+  public static final String REMOVE_DISKS_PARAMETERS_CLASS_DOC = "The class for parameters of a disks removal request.";
+
+  private CruiseControlParametersConfig() {
+  }
+
+  /**
    * Define configs for Cruise Control Parameters.
    *
    * @param configDef Config definition.
@@ -280,6 +304,21 @@ public class CruiseControlParametersConfig {
                             ConfigDef.Type.CLASS,
                             DEFAULT_TOPIC_CONFIGURATION_PARAMETERS_CLASS,
                             ConfigDef.Importance.MEDIUM,
-                            TOPIC_CONFIGURATION_PARAMETERS_CLASS_DOC);
+                            TOPIC_CONFIGURATION_PARAMETERS_CLASS_DOC)
+                    .define(RIGHTSIZE_PARAMETERS_CLASS_CONFIG,
+                            ConfigDef.Type.CLASS,
+                            DEFAULT_RIGHTSIZE_PARAMETERS_CLASS,
+                            ConfigDef.Importance.MEDIUM,
+                            RIGHTSIZE_PARAMETERS_CLASS_DOC)
+                    .define(PERMISSIONS_PARAMETERS_CLASS_CONFIG,
+                            ConfigDef.Type.CLASS,
+                            DEFAULT_PERMISSIONS_PARAMETERS_CLASS,
+                            ConfigDef.Importance.MEDIUM,
+                            PERMISSIONS_PARAMETERS_CLASS_DOC)
+                    .define(REMOVE_DISKS_PARAMETERS_CLASS_CONFIG,
+                            ConfigDef.Type.CLASS,
+                            DEFAULT_REMOVE_DISKS_PARAMETERS_CLASS,
+                            ConfigDef.Importance.MEDIUM,
+                            REMOVE_DISKS_PARAMETERS_CLASS_DOC);
   }
 }

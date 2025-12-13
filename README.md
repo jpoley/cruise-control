@@ -1,14 +1,16 @@
 Cruise Control for Apache Kafka
 ===================
 
+[![CI](https://github.com/linkedin/cruise-control/actions/workflows/ci.yaml/badge.svg)](https://github.com/linkedin/cruise-control/actions/workflows/ci.yaml)
 [![CircleCI](https://circleci.com/gh/linkedin/cruise-control.svg?style=svg)](https://circleci.com/gh/linkedin/cruise-control)
+
 
 ### Introduction ###
   Cruise Control is a product that helps run Apache Kafka clusters at large scale. Due to the popularity of 
-  Apache Kafka, many companies have bigger and bigger Kafka clusters. At LinkedIn, we have 2.6K+ Kafka brokers, 
+  Apache Kafka, many companies have increasingly large Kafka clusters with hundreds of brokers. At LinkedIn, we have 10K+ Kafka brokers, 
   which means broker deaths are an almost daily occurrence and balancing the workload of Kafka also becomes a big overhead. 
   
-  Kafka Cruise Control is designed to address this operation scalability issue.
+  Kafka Cruise Control is designed to address this operational scalability issue.
   
 ### Features ###
   Kafka Cruise Control provides the following features out of the box:
@@ -34,21 +36,35 @@ Cruise Control for Apache Kafka
     * Broker failure detection
     * Metric anomaly detection
     * Disk failure detection (not available in `kafka_0_11_and_1_0` branch)
+    * Slow broker detection (not available in `kafka_0_11_and_1_0` branch)
   
   * Admin operations, including:
     * Add brokers
-    * Decommission brokers
+    * Remove brokers
     * Demote brokers
     * Rebalance the cluster
     * Fix offline replicas (not available in `kafka_0_11_and_1_0` branch)
     * Perform preferred leader election (PLE)
     * Fix offline replicas
+    * Adjust replication factor
 
-### Environment Requirements
-* The current `master` branch of Cruise Control is compatible with Apache Kafka `2.0`, `2.1`, `2.2`, and `2.3` (i.e. [Releases](https://github.com/linkedin/cruise-control/releases) with `2.0.*`)
-* The `kafka_0_11_and_1_0` branch of Cruise Control is compatible with  Apache Kafka `0.11.0.0`, `1.0`, and `1.1` (i.e. [Releases](https://github.com/linkedin/cruise-control/releases) with `0.1.*`)
-* `message.format.version` `0.10.0` and above is needed
-* The `master` and `kafka_0_11_and_1_0` branch compile with `Scala 2.11`
+### Environment Requirements ###
+* The `main` (previously `migrate_to_kafka_2_5`) branch of Cruise Control is compatible with Apache Kafka `2.5+` (i.e. [Releases](https://github.com/linkedin/cruise-control/releases) with `2.5.*`),
+  `2.6` (i.e. [Releases](https://github.com/linkedin/cruise-control/releases) with `2.5.11+`), `2.7` (i.e. [Releases](https://github.com/linkedin/cruise-control/releases) with `2.5.36+`),
+  `2.8` (i.e. [Releases](https://github.com/linkedin/cruise-control/releases) with `2.5.66+`), `3.0` (i.e. [Releases](https://github.com/linkedin/cruise-control/releases) with `2.5.85+`),
+  `3.1` (i.e. [Releases](https://github.com/linkedin/cruise-control/releases) with `2.5.85+`), `3.8` (i.e. [Releases](https://github.com/linkedin/cruise-control/releases) with `2.5.142+`),
+  `3.9` (i.e. [Releases](https://github.com/linkedin/cruise-control/releases) with `2.5.143+`), and `4.0` (i.e. [Releases](https://github.com/linkedin/cruise-control/releases) with `2.5.144+`)
+* The `migrate_to_kafka_2_4` branch of Cruise Control is compatible with Apache Kafka `2.4` (i.e. [Releases](https://github.com/linkedin/cruise-control/releases) with `2.4.*`).
+* The `kafka_2_0_to_2_3` branch (deprecated) of Cruise Control is compatible with Apache Kafka `2.0`, `2.1`, `2.2`, and `2.3` (i.e. [Releases](https://github.com/linkedin/cruise-control/releases) with `2.0.*`).
+* The `kafka_0_11_and_1_0` branch (deprecated) of Cruise Control is compatible with Apache Kafka `0.11.0.0`, `1.0`, and `1.1` (i.e. [Releases](https://github.com/linkedin/cruise-control/releases) with `0.1.*`).
+* `message.format.version` `0.10.0` and above is needed.
+* The `kafka_2_0_to_2_3` and `kafka_0_11_and_1_0` branches compile with `Scala 2.11`.
+* The branch `migrate_to_kafka_2_4` compiles with `Scala 2.12`.
+* The branch `migrate_to_kafka_2_5` compile with `Scala 2.13`.
+* This project requires Java 17.
+
+#### Known Compatibility Issues ####
+* Support for Apache Kafka `2.0`, `2.1`, `2.2`, and `2.3` requires [KAFKA-8875](https://issues.apache.org/jira/browse/KAFKA-8875) hotfix.
 
 ### Quick Start ###
 0. Get Cruise Control
@@ -62,10 +78,10 @@ Cruise Control for Apache Kafka
         && git tag -a 0.1.10 -m "Init local version."`
 1. This step is required if `CruiseControlMetricsReporter` is used for metrics collection (i.e. the default for Cruise
 Control). The metrics reporter periodically samples the Kafka raw metrics on the broker and sends them to a Kafka topic.
-    * `./gradlew jar`
+    * `./gradlew jar` (Note: This project requires Java 17)
     * Copy `./cruise-control-metrics-reporter/build/libs/cruise-control-metrics-reporter-A.B.C.jar` (Where `A.B.C` is
     the version of the Cruise Control) to your Kafka server dependency jar folder. For Apache Kafka, the folder would
-    be `core/build/dependant-libs-SCALA_VERSION/`
+    be `core/build/dependant-libs-SCALA_VERSION/` (for a Kafka source checkout) or `libs/` (for a Kafka release download).
     * Modify Kafka server configuration to set `metric.reporters` to
     `com.linkedin.kafka.cruisecontrol.metricsreporter.CruiseControlMetricsReporter`. For Apache Kafka, server 
     properties are located at `./config/server.properties`.
@@ -76,9 +92,13 @@ Control). The metrics reporter periodically samples the Kafka raw metrics on the
     * If the default broker cleanup policy is `compact`, make sure that the topic to which Cruise Control metrics
     reporter should send messages is created with the `delete` cleanup policy -- the default metrics reporter topic
     is `__CruiseControlMetrics`.
-2. Start ZooKeeper and Kafka server ([See tutorial](https://kafka.apache.org/quickstart)).
+2. Start Kafka server ([See tutorial](https://kafka.apache.org/quickstart)), and if you're using a ZooKeeper-based Kafka cluster also start a ZooKeeper server.
 3. Modify `config/cruisecontrol.properties` of Cruise Control:
-    * (Required) fill in `bootstrap.servers` and `zookeeper.connect` to the Kafka cluster to be monitored.
+    * (Required) fill in `bootstrap.servers` to the Kafka cluster to be monitored.
+    * (Required) update `capacity.config.file` to the path of your capacity file.  
+      * Capacity file is a JSON file that provides the capacity of the brokers
+      * You can start Cruise Control server with the default file (`config/capacityJBOD.json`), but it may not reflect the actual capacity of the brokers 
+      * See [BrokerCapacityConfigurationFileResolver configurations](https://github.com/linkedin/cruise-control/wiki/Configurations#brokercapacityconfigurationfileresolver-configurations) for more information and examples
     * (Optional) set `metric.sampler.class` to your implementation (the default sampler class is `CruiseControlMetricsReporterSampler`) 
     * (Optional) set `sample.store.class` to your implementation if you have one (the default `SampleStore` is `KafkaSampleStore`)
 4. Run the following command 
@@ -146,6 +166,9 @@ The default Sample Store implementation produces metric samples back to Kafka.
 The goals in Cruise Control are pluggable with different priorities. The default goals in order of decreasing priority are:
  * **RackAwareGoal** - Ensures that all replicas of each partition are assigned in a rack aware manner -- i.e. no more than one replica of 
  each partition resides in the same rack.
+ * **RackAwareDistributionGoal** - A relaxed version of `RackAwareGoal`. Contrary to `RackAwareGoal`, as long as replicas of each partition
+ can achieve a perfectly even distribution across the racks, this goal lets placement of multiple replicas of a partition into a single rack.
+ * **MinTopicLeadersPerBrokerGoal** - Ensures that each alive broker has at least a certain number of leader replica of each topic in a configured set of topics
  * **ReplicaCapacityGoal** - Ensures that the maximum number of replicas per broker is under the specified maximum limit.
  * **DiskCapacityGoal** - Ensures that Disk space usage of each broker is below a given threshold.
  * **NetworkInboundCapacityGoal** - Ensures that inbound network utilization of each broker is below a given threshold.
@@ -172,8 +195,14 @@ The anomaly notifier allows users to be notified when an anomaly is detected. An
  * Goal violation
  * Metric anomaly
  * Disk failure (not available in `kafka_0_11_and_1_0` branch)
+ * Slow brokers (not available in `kafka_0_11_and_1_0` branch)
+ * Topic replication factor anomaly (not available in `kafka_0_11_and_1_0` branch)
+ * Topic partition size anomaly (not available in `kafka_0_11_and_1_0` branch)
+ * Maintenance Events (not available in `kafka_0_11_and_1_0` branch)
  
-In addition to anomaly notifications users can specify actions to be taken in response to an anomaly. The following actions are supported:
- * **fix** - fix the problem right away
- * **check** - check the situation again after a given delay
- * **ignore** - ignore the anomaly
+In addition to anomaly notifications, users can enable actions to be taken in response to an anomaly by turning self-healing
+on for the relevant anomaly detectors. Multiple anomaly detectors work in harmony using distinct mitigation mechanisms.
+Their actions broadly fall into the following categories:
+ * **fix** - fix the problem right away (e.g. start a rebalance, fix offline replicas)
+ * **check** - check the situation again after a configurable delay (e.g. adopt a grace period before fixing broker failures)
+ * **ignore** - ignore the anomaly (e.g. self-healing is disabled)

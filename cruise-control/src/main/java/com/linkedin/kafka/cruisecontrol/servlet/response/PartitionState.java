@@ -31,6 +31,12 @@ public class PartitionState {
   protected static final String OUT_OF_SYNC = "out-of-sync";
   @JsonResponseField
   protected static final String OFFLINE = "offline";
+  @JsonResponseField
+  protected static final String MIN_ISR = "min-isr";
+  @JsonResponseField(required = false)
+  protected static final String REMOTE_STORAGE_ENABLED = "remote-storage-enabled";
+  public static final String PARTITION_STATE_FORMAT_WITH_REMOTE_SUFFIX = "s%10s%10s%30s%30s%25s%25s%10s%25s%n";
+  public static final String PARTITION_STATE_FORMAT_WITHOUT_REMOTE_SUFFIX = "s%10s%10s%30s%30s%25s%25s%10s%n";
   protected final String _topic;
   protected final int _partition;
   protected final int _leader;
@@ -38,8 +44,11 @@ public class PartitionState {
   protected final List<Integer> _inSyncReplicas;
   protected final Set<Integer> _outOfSyncReplicas;
   protected final Set<Integer> _offlineReplicas;
+  protected final int _minIsr;
+  protected final boolean _remoteStorageEnabled;
+  protected final boolean _displayRemoteStorageEnabled;
 
-  public PartitionState(PartitionInfo partitionInfo) {
+  public PartitionState(PartitionInfo partitionInfo, int minIsr, boolean remoteStorageEnabled, boolean displayRemoteStorageEnabled) {
     _topic = partitionInfo.topic();
     _partition = partitionInfo.partition();
     _leader = partitionInfo.leader() == null ? -1 : partitionInfo.leader().id();
@@ -48,26 +57,45 @@ public class PartitionState {
     _outOfSyncReplicas = new HashSet<>(_replicas);
     _outOfSyncReplicas.removeAll(_inSyncReplicas);
     _offlineReplicas = Arrays.stream(partitionInfo.offlineReplicas()).map(Node::id).collect(Collectors.toSet());
+    _minIsr = minIsr;
+    _remoteStorageEnabled = remoteStorageEnabled;
+    _displayRemoteStorageEnabled = displayRemoteStorageEnabled;
   }
 
   protected Map<String, Object> getJsonStructure() {
-    Map<String, Object> recordMap = new HashMap<>(7);
-    recordMap.put(TOPIC, _topic);
-    recordMap.put(PARTITION, _partition);
-    recordMap.put(LEADER, _leader);
-    recordMap.put(REPLICAS, _replicas);
-    recordMap.put(IN_SYNC, _inSyncReplicas);
-    recordMap.put(OUT_OF_SYNC, _outOfSyncReplicas);
-    recordMap.put(OFFLINE, _offlineReplicas);
-    return recordMap;
+    Map<String, Object> jsonMap = new HashMap<>();
+    jsonMap.put(TOPIC, _topic);
+    jsonMap.put(PARTITION, _partition);
+    jsonMap.put(LEADER, _leader);
+    jsonMap.put(REPLICAS, _replicas);
+    jsonMap.put(IN_SYNC, _inSyncReplicas);
+    jsonMap.put(OUT_OF_SYNC, _outOfSyncReplicas);
+    jsonMap.put(OFFLINE, _offlineReplicas);
+    jsonMap.put(MIN_ISR, _minIsr);
+
+    if (_displayRemoteStorageEnabled) {
+      jsonMap.put(REMOTE_STORAGE_ENABLED, _remoteStorageEnabled);
+    }
+    return jsonMap;
   }
 
   protected String writeKafkaPartitionState(int topicNameLength) {
-    return String.format("%" + topicNameLength + "s%10s%10s%30s%30s%25s%25s%n",
-                         _topic, _partition,
-                         _leader, _replicas,
-                         _inSyncReplicas,
-                         _outOfSyncReplicas,
-                         _offlineReplicas);
+    if (_displayRemoteStorageEnabled) {
+      return String.format("%" + topicNameLength + PARTITION_STATE_FORMAT_WITH_REMOTE_SUFFIX,
+          _topic, _partition,
+          _leader, _replicas,
+          _inSyncReplicas,
+          _outOfSyncReplicas,
+          _offlineReplicas,
+          _minIsr, _remoteStorageEnabled);
+    } else {
+      return String.format("%" + topicNameLength + PARTITION_STATE_FORMAT_WITHOUT_REMOTE_SUFFIX,
+          _topic, _partition,
+          _leader, _replicas,
+          _inSyncReplicas,
+          _outOfSyncReplicas,
+          _offlineReplicas,
+          _minIsr);
+    }
   }
 }

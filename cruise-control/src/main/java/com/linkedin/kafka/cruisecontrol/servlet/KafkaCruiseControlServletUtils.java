@@ -6,6 +6,7 @@ package com.linkedin.kafka.cruisecontrol.servlet;
 
 import com.linkedin.cruisecontrol.common.config.ConfigException;
 import com.linkedin.cruisecontrol.servlet.EndPoint;
+import com.linkedin.cruisecontrol.http.CruiseControlRequestContext;
 import com.linkedin.kafka.cruisecontrol.config.KafkaCruiseControlConfig;
 import com.linkedin.kafka.cruisecontrol.config.RequestParameterWrapper;
 import com.linkedin.kafka.cruisecontrol.config.constants.WebServerConfig;
@@ -34,14 +35,13 @@ import static javax.servlet.http.HttpServletResponse.SC_OK;
 /**
  * The util class for Kafka Cruise Control servlet.
  */
-public class KafkaCruiseControlServletUtils {
-  // FIXME: Read this from a configuration
-  public static final String REQUEST_URI = "/KAFKACRUISECONTROL/";
+public final class KafkaCruiseControlServletUtils {
   public static final String GET_METHOD = "GET";
   public static final String POST_METHOD = "POST";
-  public static final String KAFKA_CRUISE_CONTROL_SERVLET_OBJECT_CONFIG = "kafka.cruise.control.servlet.object";
+  public static final String KAFKA_CRUISE_CONTROL_REQUEST_HANDLER_OBJECT_CONFIG = "kafka.cruise.control.request.handler.object";
   public static final String KAFKA_CRUISE_CONTROL_HTTP_SERVLET_REQUEST_OBJECT_CONFIG = "kafka.cruise.control.http.servlet.request.object";
   public static final String KAFKA_CRUISE_CONTROL_CONFIG_OBJECT_CONFIG = "kafka.cruise.control.config.object";
+  public static final String ROUTING_CONTEXT_OBJECT_CONFIG = "routing.context.object";
   private static final String ACCESS_CONTROL_ALLOW_ORIGIN = "Access-Control-Allow-Origin";
   private static final String ACCESS_CONTROL_ALLOW_METHODS = "Access-Control-Allow-Methods";
   private static final String ACCESS_CONTROL_ALLOW_HEADERS = "Access-Control-Allow-Headers";
@@ -51,7 +51,7 @@ public class KafkaCruiseControlServletUtils {
   private static final Map<EndPoint, RequestParameterWrapper> REQUEST_PARAMETER_CONFIGS;
 
   static {
-    Map<EndPoint, RequestParameterWrapper> requestParameterConfigs = new HashMap<>(CruiseControlEndPoint.cachedValues().size());
+    Map<EndPoint, RequestParameterWrapper> requestParameterConfigs = new HashMap<>();
 
     RequestParameterWrapper bootstrap = new RequestParameterWrapper(BOOTSTRAP_PARAMETERS_CLASS_CONFIG,
                                                                     BOOTSTRAP_PARAMETER_OBJECT_CONFIG,
@@ -92,6 +92,9 @@ public class KafkaCruiseControlServletUtils {
     RequestParameterWrapper pauseSampling = new RequestParameterWrapper(PAUSE_SAMPLING_PARAMETERS_CLASS_CONFIG,
                                                                         PAUSE_RESUME_PARAMETER_OBJECT_CONFIG,
                                                                         PAUSE_SAMPLING_REQUEST_CLASS_CONFIG);
+    RequestParameterWrapper permissions = new RequestParameterWrapper(PERMISSIONS_PARAMETERS_CLASS_CONFIG,
+                                                                       PERMISSIONS_PARAMETER_OBJECT_CONFIG,
+                                                                        PERMISSIONS_REQUEST_CLASS_CONFIG);
     RequestParameterWrapper resumeSampling = new RequestParameterWrapper(RESUME_SAMPLING_PARAMETERS_CLASS_CONFIG,
                                                                          PAUSE_RESUME_PARAMETER_OBJECT_CONFIG,
                                                                          RESUME_SAMPLING_REQUEST_CLASS_CONFIG);
@@ -113,6 +116,12 @@ public class KafkaCruiseControlServletUtils {
     RequestParameterWrapper topicConfiguration = new RequestParameterWrapper(TOPIC_CONFIGURATION_PARAMETERS_CLASS_CONFIG,
                                                                              TOPIC_CONFIGURATION_PARAMETER_OBJECT_CONFIG,
                                                                              TOPIC_CONFIGURATION_REQUEST_CLASS_CONFIG);
+    RequestParameterWrapper rightsize = new RequestParameterWrapper(RIGHTSIZE_PARAMETERS_CLASS_CONFIG,
+                                                                    RIGHTSIZE_PARAMETER_OBJECT_CONFIG,
+                                                                    RIGHTSIZE_REQUEST_CLASS_CONFIG);
+    RequestParameterWrapper removeDisks = new RequestParameterWrapper(REMOVE_DISKS_PARAMETERS_CLASS_CONFIG,
+                                                                      REMOVE_DISKS_PARAMETER_OBJECT_CONFIG,
+                                                                      REMOVE_DISKS_REQUEST_CLASS_CONFIG);
 
     requestParameterConfigs.put(BOOTSTRAP, bootstrap);
     requestParameterConfigs.put(TRAIN, train);
@@ -134,17 +143,11 @@ public class KafkaCruiseControlServletUtils {
     requestParameterConfigs.put(REVIEW, review);
     requestParameterConfigs.put(REVIEW_BOARD, reviewBoard);
     requestParameterConfigs.put(TOPIC_CONFIGURATION, topicConfiguration);
+    requestParameterConfigs.put(RIGHTSIZE, rightsize);
+    requestParameterConfigs.put(PERMISSIONS, permissions);
+    requestParameterConfigs.put(REMOVE_DISKS, removeDisks);
 
     REQUEST_PARAMETER_CONFIGS = Collections.unmodifiableMap(requestParameterConfigs);
-  }
-
-
-  private KafkaCruiseControlServletUtils() {
-
-  }
-
-  public static RequestParameterWrapper requestParameterFor(EndPoint endpoint) {
-    return REQUEST_PARAMETER_CONFIGS.get(endpoint);
   }
 
   static final String[] HEADERS_TO_TRY = {
@@ -161,20 +164,27 @@ public class KafkaCruiseControlServletUtils {
       "REMOTE_ADDR"
   };
 
+  private KafkaCruiseControlServletUtils() {
+
+  }
+
+  public static RequestParameterWrapper requestParameterFor(EndPoint endpoint) {
+    return REQUEST_PARAMETER_CONFIGS.get(endpoint);
+  }
+
   /**
    * Get the ip address of the client sending the request.
-   *
-   * @param request The http request.
+   * @param requestContext the request context.
    * @return The ip address of the client sending the request.
    */
-  public static String getClientIpAddress(HttpServletRequest request) {
+  public static String getClientIpAddress(CruiseControlRequestContext requestContext) {
     for (String header : HEADERS_TO_TRY) {
-      String ip = request.getHeader(header);
+      String ip = requestContext.getHeader(header);
       if (ip != null && ip.length() != 0 && !"unknown".equalsIgnoreCase(ip)) {
         return ip;
       }
     }
-    return request.getRemoteAddr();
+    return requestContext.getRemoteAddr();
   }
 
   static String urlEncode(String s) throws UnsupportedEncodingException {
@@ -185,22 +195,20 @@ public class KafkaCruiseControlServletUtils {
    * Returns the GET or POST endpoint if the request contains a valid one, otherwise (1) writes the error response to
    * the given HTTP response and (2) returns null.
    *
-   * @param request HTTP request received by Cruise Control.
-   * @param response HTTP response of Cruise Control.
-   * @param config The config of Cruise Control.
+   * @param requestContext HTTP request received by Cruise Control.
    * @return The endpoint if the request contains a valid one, otherwise (1) writes the error response to the given HTTP
    * response and (2) returns null.
    */
-  static CruiseControlEndPoint getValidEndpoint(HttpServletRequest request, HttpServletResponse response, KafkaCruiseControlConfig config)
+  public static CruiseControlEndPoint getValidEndpoint(CruiseControlRequestContext requestContext)
       throws IOException {
-    CruiseControlEndPoint endPoint = endPoint(request);
+    CruiseControlEndPoint endPoint = endPoint(requestContext);
     if (endPoint == null) {
-      String method = request.getMethod();
+      String method = requestContext.getMethod();
       String errorMessage = String.format("Unrecognized endpoint in request '%s'%nSupported %s endpoints: %s",
-                                          request.getPathInfo(), method, method.equals(GET_METHOD)
+                                          requestContext.getPathInfo(), method, method.equals(GET_METHOD)
                                                                          ? CruiseControlEndPoint.getEndpoints()
                                                                          : CruiseControlEndPoint.postEndpoints());
-      writeErrorResponse(response, null, errorMessage, SC_NOT_FOUND, wantJSON(request), wantResponseSchema(request), config);
+      writeErrorResponse(requestContext, null, errorMessage, SC_NOT_FOUND, wantJSON(requestContext), wantResponseSchema(requestContext));
       return null;
     }
     return endPoint;
@@ -208,42 +216,45 @@ public class KafkaCruiseControlServletUtils {
 
   /**
    * Creates a {@link HttpServletResponse#SC_BAD_REQUEST} Http servlet response.
+   * @param ure User request exception to be handled.
+   * @param requestContext HTTP request received by Cruise Control.
+   * @return The error message.
    */
-  static String handleUserRequestException(UserRequestException ure,
-                                           HttpServletRequest request,
-                                           HttpServletResponse response,
-                                           KafkaCruiseControlConfig config)
+  public static String handleUserRequestException(UserRequestException ure,
+                                                  CruiseControlRequestContext requestContext)
       throws IOException {
-    String errorMessage = String.format("Bad %s request '%s' due to '%s'.", request.getMethod(), request.getPathInfo(), ure.getMessage());
-    writeErrorResponse(response, ure, errorMessage, SC_BAD_REQUEST, wantJSON(request), wantResponseSchema(request), config);
+    String errorMessage = String.format("Bad %s request '%s' due to '%s'.", requestContext.getMethod(),
+            requestContext.getPathInfo(), ure.getMessage());
+    writeErrorResponse(requestContext, ure, errorMessage, SC_BAD_REQUEST, wantJSON(requestContext), wantResponseSchema(requestContext));
     return errorMessage;
   }
-
   /**
    * Creates a {@link HttpServletResponse#SC_FORBIDDEN} Http servlet response.
+   * @param ce Config exception to be handled.
+   * @param requestContext HTTP request received by Cruise Control.
+   * @return The error message.
    */
-  static String handleConfigException(ConfigException ce,
-                                      HttpServletRequest request,
-                                      HttpServletResponse response,
-                                      KafkaCruiseControlConfig config)
+  public static String handleConfigException(ConfigException ce,
+                                             CruiseControlRequestContext requestContext)
       throws IOException {
     String errorMessage = String.format("Cannot process %s request '%s' due to: '%s'.",
-                                        request.getMethod(), request.getPathInfo(), ce.getMessage());
-    writeErrorResponse(response, ce, errorMessage, SC_FORBIDDEN, wantJSON(request), wantResponseSchema(request), config);
+                                        requestContext.getMethod(), requestContext.getPathInfo(), ce.getMessage());
+    writeErrorResponse(requestContext, ce, errorMessage, SC_FORBIDDEN, wantJSON(requestContext), wantResponseSchema(requestContext));
     return errorMessage;
   }
 
   /**
    * Creates a {@link HttpServletResponse#SC_INTERNAL_SERVER_ERROR} Http servlet response.
+   * @param e Exception to be handled
+   * @param requestContext HTTP request received by Cruise Control.
+   * @return The error message.
    */
-  static String handleException(Exception e,
-                                HttpServletRequest request,
-                                HttpServletResponse response,
-                                KafkaCruiseControlConfig config)
+  public static String handleException(Exception e,
+                                       CruiseControlRequestContext requestContext)
       throws IOException {
     String errorMessage = String.format("Error processing %s request '%s' due to: '%s'.",
-                                        request.getMethod(), request.getPathInfo(), e.getMessage());
-    writeErrorResponse(response, e, errorMessage, SC_INTERNAL_SERVER_ERROR, wantJSON(request), wantResponseSchema(request), config);
+                                        requestContext.getMethod(), requestContext.getPathInfo(), e.getMessage());
+    writeErrorResponse(requestContext, e, errorMessage, SC_INTERNAL_SERVER_ERROR, wantJSON(requestContext), wantResponseSchema(requestContext));
     return errorMessage;
   }
 
@@ -270,9 +281,16 @@ public class KafkaCruiseControlServletUtils {
   /**
    * Ensure that the given headerName does not exist in the given request header.
    *
-   * @param request HTTP request received by Cruise Control.
+   * @param requestContext HTTP request received by Cruise Control.
    * @param headerName a <code>String</code> specifying the header name
    */
+  static void ensureHeaderNotPresent(CruiseControlRequestContext requestContext, String headerName) {
+    String value = requestContext.getHeaders().get(headerName);
+    if (value != null) {
+      throw new IllegalArgumentException(String.format("Unexpected header %s (value: %s) in the request.", value, headerName));
+    }
+  }
+
   static void ensureHeaderNotPresent(HttpServletRequest request, String headerName) {
     String value = request.getHeader(headerName);
     if (value != null) {
@@ -280,7 +298,28 @@ public class KafkaCruiseControlServletUtils {
     }
   }
 
-  public static String httpServletRequestToString(HttpServletRequest request) {
-    return String.format("%s %s", request.getMethod(), request.getRequestURI());
+  public static String httpServletRequestToString(CruiseControlRequestContext requestContext) {
+    return String.format("%s %s", requestContext.getMethod(), requestContext.getRequestURI());
+  }
+
+  /**
+   * Combines the given base with the query parameters retrieved from the given parameter map.
+   *
+   * @param base The base of the query without parameters
+   * @param parameterMap Parameter map.
+   * @return Query with parameters.
+   */
+  public static String queryWithParameters(String base, Map<String, String[]> parameterMap) {
+    StringBuilder sb = new StringBuilder(base);
+    String queryParamDelimiter = "?";
+    for (Map.Entry<String, String[]> paramSet : parameterMap.entrySet()) {
+      for (String paramValue : paramSet.getValue()) {
+        sb.append(queryParamDelimiter).append(paramSet.getKey()).append("=").append(paramValue);
+        if ("?".equals(queryParamDelimiter)) {
+          queryParamDelimiter = "&";
+        }
+      }
+    }
+    return sb.toString();
   }
 }

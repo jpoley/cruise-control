@@ -28,7 +28,7 @@ import static com.linkedin.kafka.cruisecontrol.servlet.parameters.ParameterUtils
  * <pre>
  * Stop the proposal execution.
  *    POST /kafkacruisecontrol/stop_proposal_execution?json=[true/false]&amp;review_id=[id]&amp;force_stop=[true/false]
- *    &amp;get_response_schema=[true/false]
+ *    &amp;get_response_schema=[true/false]&amp;stop_external_agent=[true/false]&amp;doAs=[user]&amp;reason=[reason-for-request]
  * </pre>
  */
 public class StopProposalParameters extends AbstractParameters {
@@ -37,11 +37,14 @@ public class StopProposalParameters extends AbstractParameters {
     SortedSet<String> validParameterNames = new TreeSet<>(String.CASE_INSENSITIVE_ORDER);
     validParameterNames.add(REVIEW_ID_PARAM);
     validParameterNames.add(FORCE_STOP_PARAM);
+    validParameterNames.add(STOP_EXTERNAL_AGENT_PARAM);
+    validParameterNames.add(REASON_PARAM);
     validParameterNames.addAll(AbstractParameters.CASE_INSENSITIVE_PARAMETER_NAMES);
     CASE_INSENSITIVE_PARAMETER_NAMES = Collections.unmodifiableSortedSet(validParameterNames);
   }
   protected Integer _reviewId;
   protected boolean _forceExecutionStop;
+  protected boolean _stopExternalAgent;
 
   public StopProposalParameters() {
     super();
@@ -51,8 +54,9 @@ public class StopProposalParameters extends AbstractParameters {
   protected void initParameters() throws UnsupportedEncodingException {
     super.initParameters();
     boolean twoStepVerificationEnabled = _config.getBoolean(WebServerConfig.TWO_STEP_VERIFICATION_ENABLED_CONFIG);
-    _reviewId = ParameterUtils.reviewId(_request, twoStepVerificationEnabled);
-    _forceExecutionStop = ParameterUtils.forceExecutionStop(_request);
+    _reviewId = ParameterUtils.reviewId(_requestContext, twoStepVerificationEnabled);
+    _forceExecutionStop = ParameterUtils.forceExecutionStop(_requestContext);
+    _stopExternalAgent = ParameterUtils.stopExternalAgent(_requestContext);
   }
 
   @Override
@@ -66,6 +70,10 @@ public class StopProposalParameters extends AbstractParameters {
 
   public boolean forceExecutionStop() {
     return _forceExecutionStop;
+  }
+
+  public boolean stopExternalAgent() {
+    return _stopExternalAgent;
   }
 
   @Override

@@ -24,6 +24,7 @@ class SamplingTask implements Runnable {
   private final LoadMonitorTaskRunner _loadMonitorTaskRunner;
   private final MetricFetcherManager _metricFetcherManager;
   private final SampleStore _sampleStore;
+  private final SampleStore _sampleStoreForPartitionMetricOnExecution;
   private long _lastSamplingPeriodEndTimeMs;
 
   SamplingTask(long samplingIntervalMs,
@@ -31,6 +32,7 @@ class SamplingTask implements Runnable {
                LoadMonitorTaskRunner loadMonitorTaskRunner,
                MetricFetcherManager metricFetcherManager,
                SampleStore sampleStore,
+               SampleStore sampleStoreForPartitionMetricOnExecution,
                Time time) {
     _samplingIntervalMs = samplingIntervalMs;
     _time = time;
@@ -38,13 +40,15 @@ class SamplingTask implements Runnable {
     _loadMonitorTaskRunner = loadMonitorTaskRunner;
     _metricFetcherManager = metricFetcherManager;
     _sampleStore = sampleStore;
+    _sampleStoreForPartitionMetricOnExecution = sampleStoreForPartitionMetricOnExecution;
     _lastSamplingPeriodEndTimeMs = _time.milliseconds() - _samplingIntervalMs;
   }
 
   public void run() {
     long now = _time.milliseconds();
-    if (!_loadMonitorTaskRunner.awaitingPauseSampling() && _loadMonitorTaskRunner.compareAndSetState(LoadMonitorTaskRunner.LoadMonitorTaskRunnerState.RUNNING,
-                                                  LoadMonitorTaskRunner.LoadMonitorTaskRunnerState.SAMPLING)) {
+    if (!_loadMonitorTaskRunner.awaitingPauseSampling()
+        && _loadMonitorTaskRunner.compareAndSetState(LoadMonitorTaskRunner.LoadMonitorTaskRunnerState.RUNNING,
+                                                     LoadMonitorTaskRunner.LoadMonitorTaskRunnerState.SAMPLING)) {
       long samplingPeriodEndMs = now;
       try {
         boolean hasSamplingError;
@@ -53,10 +57,11 @@ class SamplingTask implements Runnable {
           _metadataClient.refreshMetadata();
           samplingPeriodEndMs = _time.milliseconds();
 
-          hasSamplingError = _metricFetcherManager.fetchPartitionMetricSamples(_lastSamplingPeriodEndTimeMs,
-                                                                               samplingPeriodEndMs,
-                                                                               deadline - now,
-                                                                               _sampleStore);
+          hasSamplingError = _metricFetcherManager.fetchMetricSamples(_lastSamplingPeriodEndTimeMs,
+                                                                      samplingPeriodEndMs,
+                                                                      deadline - now,
+                                                                      _sampleStore, _sampleStoreForPartitionMetricOnExecution,
+                                                                      _loadMonitorTaskRunner.samplingMode());
 
           if (!hasSamplingError) {
             _lastSamplingPeriodEndTimeMs = samplingPeriodEndMs;

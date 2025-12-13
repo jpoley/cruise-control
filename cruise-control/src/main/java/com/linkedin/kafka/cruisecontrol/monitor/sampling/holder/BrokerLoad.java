@@ -8,6 +8,7 @@ import com.linkedin.kafka.cruisecontrol.metricsreporter.metric.CruiseControlMetr
 import com.linkedin.kafka.cruisecontrol.metricsreporter.metric.PartitionMetric;
 import com.linkedin.kafka.cruisecontrol.metricsreporter.metric.RawMetricType;
 import com.linkedin.kafka.cruisecontrol.metricsreporter.metric.TopicMetric;
+import java.util.Collections;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
@@ -27,6 +28,7 @@ import static com.linkedin.kafka.cruisecontrol.monitor.sampling.holder.HolderUti
 import static com.linkedin.kafka.cruisecontrol.monitor.sampling.holder.HolderUtils.convertUnit;
 import static com.linkedin.kafka.cruisecontrol.monitor.sampling.holder.HolderUtils.METRIC_TYPES_TO_SUM;
 import static com.linkedin.kafka.cruisecontrol.monitor.sampling.holder.HolderUtils.MISSING_BROKER_METRIC_VALUE;
+import static com.linkedin.cruisecontrol.common.utils.Utils.validateNotNull;
 
 
 /**
@@ -39,13 +41,6 @@ public class BrokerLoad {
   private final RawMetricsHolder _brokerMetrics;
   private final Map<String, RawMetricsHolder> _dotHandledTopicMetrics;
   private final Map<TopicPartition, RawMetricsHolder> _dotHandledPartitionMetrics;
-
-  public BrokerLoad() {
-    _brokerMetrics = new RawMetricsHolder();
-    _dotHandledTopicMetrics = new HashMap<>();
-    _dotHandledPartitionMetrics = new HashMap<>();
-  }
-
   // Remember which topic has partition size reported. Because the topic level IO metrics are only created when
   // there is IO, the topic level IO metrics may be missing if there was no traffic to the topic on the broker.
   // However, because the partition size will always be reported, when we see partition size was reported for
@@ -55,6 +50,12 @@ public class BrokerLoad {
   private boolean _minRequiredBrokerMetricsAvailable = false;
   // Set to the latest possible deserialization version based on the sampled data.
   private byte _brokerSampleDeserializationVersion = -1;
+
+  public BrokerLoad() {
+    _brokerMetrics = new RawMetricsHolder();
+    _dotHandledTopicMetrics = new HashMap<>();
+    _dotHandledPartitionMetrics = new HashMap<>();
+  }
 
   /**
    * Record the given Cruise Control metric.
@@ -88,7 +89,7 @@ public class BrokerLoad {
    * Check whether all dot handled topic metrics are available for the given dot-handled topic name.
    *
    * @param dotHandledTopic Dot-handled topic name.
-   * @return True if all dot handled topic metrics are available for the given dot-handled topic name, false otherwise.
+   * @return {@code true} if all dot handled topic metrics are available for the given dot-handled topic name, {@code false} otherwise.
    */
   public boolean allDotHandledTopicMetricsAvailable(String dotHandledTopic) {
     // We rely on the partition size metric to determine whether a topic metric is available or not.
@@ -110,7 +111,7 @@ public class BrokerLoad {
    *
    * @param tpWithDotHandled Topic partition with dot-handled topic name.
    * @param rawMetricType Raw metric type.
-   * @return True if partition metrics are available for the given dot-handled partition name and raw metric type, false
+   * @return {@code true} if partition metrics are available for the given dot-handled partition name and raw metric type, false
    * otherwise.
    */
   public boolean partitionMetricAvailable(TopicPartition tpWithDotHandled, RawMetricType rawMetricType) {
@@ -119,7 +120,7 @@ public class BrokerLoad {
   }
 
   public Set<RawMetricType> missingBrokerMetricsInMinSupportedVersion() {
-    return _missingBrokerMetricsInMinSupportedVersion;
+    return Collections.unmodifiableSet(_missingBrokerMetricsInMinSupportedVersion);
   }
 
   /**
@@ -130,12 +131,9 @@ public class BrokerLoad {
    */
   public double brokerMetric(RawMetricType rawMetricType) {
     sanityCheckMetricScope(rawMetricType, BROKER);
-    ValueHolder valueHolder = _brokerMetrics.metricValue(rawMetricType);
-    if (valueHolder == null) {
-      throw new IllegalArgumentException(String.format("Broker metric %s does not exist.", rawMetricType));
-    } else {
-      return convertUnit(valueHolder.value(), rawMetricType);
-    }
+    ValueHolder valueHolder = validateNotNull(_brokerMetrics.metricValue(rawMetricType),
+            () -> String.format("Broker metric %s does not exist.", rawMetricType));
+    return convertUnit(valueHolder.value(), rawMetricType);
   }
 
   public double topicMetrics(String dotHandledTopic, RawMetricType rawMetricType) {
@@ -288,7 +286,7 @@ public class BrokerLoad {
    *
    * @param cluster The Kafka cluster.
    * @param brokerId The broker id to check.
-   * @return True if there are enough topic level metrics, false otherwise.
+   * @return {@code true} if there are enough topic level metrics, {@code false} otherwise.
    */
   private boolean enoughTopicPartitionMetrics(Cluster cluster, int brokerId) {
     Set<String> missingTopics = new HashSet<>();
@@ -308,7 +306,8 @@ public class BrokerLoad {
       }
     });
     boolean result = ((double) missingTopics.size() / topicsInBroker.size()) <= MAX_ALLOWED_MISSING_TOPIC_METRIC_PERCENT
-                     && ((double) missingPartitions.get() / cluster.partitionsForNode(brokerId).size() <= MAX_ALLOWED_MISSING_PARTITION_METRIC_PERCENT);
+                     && (double) missingPartitions.get() / cluster.partitionsForNode(brokerId).size()
+                        <= MAX_ALLOWED_MISSING_PARTITION_METRIC_PERCENT;
     if (!result) {
       LOG.warn("Broker {} is missing {}/{} topics metrics and {}/{} leader partition metrics. Missing leader topics: {}.", brokerId,
                missingTopics.size(), topicsInBroker.size(), missingPartitions.get(), cluster.partitionsForNode(brokerId).size(), missingTopics);

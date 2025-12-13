@@ -4,11 +4,17 @@
 
 package com.linkedin.kafka.cruisecontrol.servlet.response;
 
+import com.linkedin.kafka.cruisecontrol.analyzer.goals.BrokerSetAwareGoal;
+import com.linkedin.kafka.cruisecontrol.config.BrokerSetResolutionHelper;
+import com.linkedin.kafka.cruisecontrol.config.BrokerSetResolver;
 import com.linkedin.kafka.cruisecontrol.config.KafkaCruiseControlConfig;
+import com.linkedin.kafka.cruisecontrol.config.constants.AnalyzerConfig;
+import com.linkedin.kafka.cruisecontrol.exception.BrokerSetResolutionException;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.HashSet;
+import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.TreeMap;
@@ -16,35 +22,39 @@ import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 import java.util.stream.Collectors;
+import org.apache.kafka.clients.admin.AdminClient;
+import org.apache.kafka.clients.admin.LogDirDescription;
 import org.apache.kafka.common.Cluster;
 import org.apache.kafka.common.KafkaFuture;
 import org.apache.kafka.common.Node;
 import org.apache.kafka.common.PartitionInfo;
-import org.apache.kafka.common.protocol.Errors;
-import org.apache.kafka.common.requests.DescribeLogDirsResponse;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import static com.linkedin.kafka.cruisecontrol.KafkaCruiseControlUtils.describeLogDirs;
 import static com.linkedin.kafka.cruisecontrol.config.constants.ExecutorConfig.LOGDIR_RESPONSE_TIMEOUT_MS_CONFIG;
 
 @JsonResponseClass
 public class ClusterBrokerState {
   private static final Logger LOG = LoggerFactory.getLogger(ClusterBrokerState.class);
   @JsonResponseField
-  protected static final String LEADER_COUNT = "LeaderCountByBrokerId";
+  public static final String LEADER_COUNT = "LeaderCountByBrokerId";
   @JsonResponseField
-  protected static final String OUT_OF_SYNC_COUNT = "OutOfSyncCountByBrokerId";
+  public static final String OUT_OF_SYNC_COUNT = "OutOfSyncCountByBrokerId";
   @JsonResponseField
-  protected static final String REPLICA_COUNT = "ReplicaCountByBrokerId";
+  public static final String REPLICA_COUNT = "ReplicaCountByBrokerId";
   @JsonResponseField
-  protected static final String OFFLINE_REPLICA_COUNT = "OfflineReplicaCountByBrokerId";
+  public static final String OFFLINE_REPLICA_COUNT = "OfflineReplicaCountByBrokerId";
   @JsonResponseField
-  protected static final String IS_CONTROLLER = "IsController";
+  public static final String IS_CONTROLLER = "IsController";
   @JsonResponseField
-  protected static final String ONLINE_LOGDIRS = "OnlineLogDirsByBrokerId";
+  public static final String ONLINE_LOGDIRS = "OnlineLogDirsByBrokerId";
   @JsonResponseField
-  protected static final String OFFLINE_LOGDIRS = "OfflineLogDirsByBrokerId";
+  public static final String OFFLINE_LOGDIRS = "OfflineLogDirsByBrokerId";
+  @JsonResponseField
+  public static final String SUMMARY = "Summary";
+  @JsonResponseField
+  public static final String BROKER_SET = "BrokerSetByBrokerId";
+  public static final String TIMED_OUT_LOGDIR_FLAG = "timed_out";
   protected final Map<Integer, Integer> _leaderCountByBrokerId;
   protected final Map<Integer, Integer> _outOfSyncCountByBrokerId;
   protected final Map<Integer, Integer> _replicaCountByBrokerId;
@@ -53,13 +63,14 @@ public class ClusterBrokerState {
   protected final Map<Integer, Set<String>> _onlineLogDirsByBrokerId;
   protected final Map<Integer, Set<String>> _offlineLogDirsByBrokerId;
   protected final Cluster _kafkaCluster;
-  protected final Map<String, Object> _adminClientConfigs;
+  protected final AdminClient _adminClient;
   protected final KafkaCruiseControlConfig _config;
+  protected Map<Integer, String> _brokerSetIdByBrokerId;
 
-  public ClusterBrokerState(Cluster kafkaCluster, Map<String, Object> adminClientConfigs, KafkaCruiseControlConfig config)
+  public ClusterBrokerState(Cluster kafkaCluster, AdminClient adminClient, KafkaCruiseControlConfig config, BrokerSetResolver brokerSetResolver)
       throws ExecutionException, InterruptedException {
     _kafkaCluster = kafkaCluster;
-    _adminClientConfigs = adminClientConfigs;
+    _adminClient = adminClient;
     _config = config;
     _leaderCountByBrokerId = new TreeMap<>();
     _outOfSyncCountByBrokerId = new TreeMap<>();
@@ -75,20 +86,33 @@ public class ClusterBrokerState {
 
     _onlineLogDirsByBrokerId = new TreeMap<>();
     _offlineLogDirsByBrokerId = new TreeMap<>();
+
+    _brokerSetIdByBrokerId = new HashMap<>();
+
+    // Only resolve broker-set if the default goals contain the BrokerSetAwareGoal
+    List<String> defaultGoals = config.getList(AnalyzerConfig.DEFAULT_GOALS_CONFIG);
+    if (defaultGoals.contains(BrokerSetAwareGoal.class.getName())) {
+      try {
+        BrokerSetResolutionHelper brokerSetResolutionHelper = new BrokerSetResolutionHelper(kafkaCluster, brokerSetResolver);
+        _brokerSetIdByBrokerId.putAll(brokerSetResolutionHelper.brokerSetIdByBrokerId());
+      } catch (BrokerSetResolutionException e) {
+        LOG.error("Failed to resolve broker set with exception: ", e);
+      }
+    }
+
     // Broker LogDirs Summary
     populateKafkaBrokerLogDirState(_onlineLogDirsByBrokerId, _offlineLogDirsByBrokerId, _replicaCountByBrokerId.keySet());
   }
 
-  protected Map<String, Object> getJsonStructure() {
-    Map<String, Object> jsonMap = new HashMap<>(7);
-    jsonMap.put(LEADER_COUNT, _leaderCountByBrokerId);
-    jsonMap.put(OUT_OF_SYNC_COUNT, _outOfSyncCountByBrokerId);
-    jsonMap.put(REPLICA_COUNT, _replicaCountByBrokerId);
-    jsonMap.put(OFFLINE_REPLICA_COUNT, _offlineReplicaCountByBrokerId);
-    jsonMap.put(IS_CONTROLLER, _isControllerByBrokerId);
-    jsonMap.put(ONLINE_LOGDIRS, _onlineLogDirsByBrokerId);
-    jsonMap.put(OFFLINE_LOGDIRS, _offlineLogDirsByBrokerId);
-    return jsonMap;
+  /**
+   * @return response with JSON structure.
+   */
+  public Map<String, Object> getJsonStructure() {
+    return Map.of(LEADER_COUNT, _leaderCountByBrokerId, OUT_OF_SYNC_COUNT, _outOfSyncCountByBrokerId,
+                  REPLICA_COUNT, _replicaCountByBrokerId, OFFLINE_REPLICA_COUNT, _offlineReplicaCountByBrokerId,
+                  IS_CONTROLLER, _isControllerByBrokerId, ONLINE_LOGDIRS, _onlineLogDirsByBrokerId, OFFLINE_LOGDIRS, _offlineLogDirsByBrokerId,
+                  SUMMARY, new ClusterStats(_kafkaCluster.topics().size(), _replicaCountByBrokerId, _leaderCountByBrokerId).getJsonStructure(),
+                  BROKER_SET, _brokerSetIdByBrokerId);
   }
 
   /**
@@ -147,7 +171,7 @@ public class ClusterBrokerState {
                                                 Set<Integer> brokers)
       throws ExecutionException, InterruptedException {
     // If the broker does not show up in latest metadata, the broker is dead.
-    Set<Integer> aliveBrokers = new HashSet<>(brokers.size());
+    Set<Integer> aliveBrokers = new HashSet<>();
     _kafkaCluster.nodes().forEach(node -> aliveBrokers.add(node.id()));
     for (Integer broker: brokers) {
       if (!aliveBrokers.contains(broker)) {
@@ -156,14 +180,15 @@ public class ClusterBrokerState {
       }
     }
 
-    Map<Integer, KafkaFuture<Map<String, DescribeLogDirsResponse.LogDirInfo>>> logDirsByBrokerId = describeLogDirs(aliveBrokers, _adminClientConfigs).values();
-    for (Map.Entry<Integer, KafkaFuture<Map<String, DescribeLogDirsResponse.LogDirInfo>>> entry : logDirsByBrokerId.entrySet()) {
+    Map<Integer, KafkaFuture<Map<String, LogDirDescription>>> logDirsByBrokerId
+        = _adminClient.describeLogDirs(aliveBrokers).descriptions();
+    for (Map.Entry<Integer, KafkaFuture<Map<String, LogDirDescription>>> entry : logDirsByBrokerId.entrySet()) {
       onlineLogDirsByBrokerId.put(entry.getKey(), new HashSet<>());
       offlineLogDirsByBrokerId.put(entry.getKey(), new HashSet<>());
 
       try {
         entry.getValue().get(_config.getLong(LOGDIR_RESPONSE_TIMEOUT_MS_CONFIG), TimeUnit.MILLISECONDS).forEach((key, value) -> {
-          if (value.error == Errors.NONE) {
+          if (value.error() == null) {
             onlineLogDirsByBrokerId.get(entry.getKey()).add(key);
           } else {
             offlineLogDirsByBrokerId.get(entry.getKey()).add(key);
@@ -171,25 +196,33 @@ public class ClusterBrokerState {
         });
       } catch (TimeoutException te) {
         LOG.error("Getting log dir information for broker {} timed out.", entry.getKey());
-        onlineLogDirsByBrokerId.get(entry.getKey()).add("timed_out");
-        offlineLogDirsByBrokerId.get(entry.getKey()).add("timed_out");
+        onlineLogDirsByBrokerId.get(entry.getKey()).add(TIMED_OUT_LOGDIR_FLAG);
+        offlineLogDirsByBrokerId.get(entry.getKey()).add(TIMED_OUT_LOGDIR_FLAG);
       }
     }
   }
 
-  protected void writeBrokerSummary(StringBuilder sb) {
+  /**
+   * Write broker summary
+   * @param sb String builder to write the response to.
+   */
+  public void writeBrokerSummary(StringBuilder sb) {
+    // Overall Summary / Stats
+    new ClusterStats(_kafkaCluster.topics().size(), _replicaCountByBrokerId, _leaderCountByBrokerId).writeClusterStats(sb);
+    // Broker Summary
     String initMessage = "Brokers:";
-    sb.append(String.format("%s%n%20s%20s%20s%20s%20s%20s%n", initMessage, "BROKER", "LEADER(S)", "REPLICAS", "OUT-OF-SYNC",
-                            "OFFLINE", "IS_CONTROLLER"));
+    sb.append(String.format("%s%n%20s%20s%20s%20s%20s%20s%20s%n", initMessage, "BROKER", "LEADER(S)", "REPLICAS", "OUT-OF-SYNC",
+                            "OFFLINE", "IS_CONTROLLER", "BROKER_SET"));
 
     for (Integer brokerId : _replicaCountByBrokerId.keySet()) {
-      sb.append(String.format("%20d%20d%20d%20d%20d%20s%n",
+      sb.append(String.format("%20d%20d%20d%20d%20d%20s%20s%n",
                               brokerId,
                               _leaderCountByBrokerId.getOrDefault(brokerId, 0),
                               _replicaCountByBrokerId.getOrDefault(brokerId, 0),
                               _outOfSyncCountByBrokerId.getOrDefault(brokerId, 0),
                               _offlineReplicaCountByBrokerId.getOrDefault(brokerId, 0),
-                              _isControllerByBrokerId.get(brokerId)));
+                              _isControllerByBrokerId.get(brokerId),
+                              _brokerSetIdByBrokerId.get(brokerId)));
     }
     // Broker LogDirs Summary
     writeKafkaBrokerLogDirState(sb, _replicaCountByBrokerId.keySet());

@@ -21,20 +21,20 @@ import java.util.function.Function;
  *  The SortedReplicas uses three type of functions to sort the replicas in the broker/disk.
  *  <ul>
  *     <li>
- *      <tt>ScoreFunction</tt>(optional): the score function generates a score for each replica to sort. The replicas are
+ *      {@code ScoreFunction}(optional): the score function generates a score for each replica to sort. The replicas are
  *      sorted based on their score in ascending order.
  *    </li>
  *    <li>
- *      <tt>SelectionFunction</tt>(optional): the selection function decides which replicas to include in the sorted
+ *      {@code SelectionFunction}(optional): the selection function decides which replicas to include in the sorted
  *      replica list. For example, in some cases, the users may only want to have sorted leader replicas. Note there can
  *      be multiple selection functions, only replica which satisfies requirement of all selection functions will be included.
  *    </li>
  *    <li>
- *      <tt>PriorityFunction</tt>(optional): the priority function allows users to prioritize certain replicas in the
+ *      {@code PriorityFunction}(optional): the priority function allows users to prioritize certain replicas in the
  *      sorted replicas. The replicas will be sorted by their priority first. There can be multiple priority functions,
  *      which will be applied one by one based on the order in {@link #_priorityFuncs} to resolve priority between two replicas.
- *      In the end, the replicas with the same priority are sorted with their score from the <tt>scoreFunction</tt>.
- *      Note that if a priority function is provided, the <tt>SortedSet</tt> returned by the
+ *      In the end, the replicas with the same priority are sorted with their score from the {@code scoreFunction}.
+ *      Note that if a priority function is provided, the {@code SortedSet} returned by the
  *      {@link #sortedReplicas(boolean)} is no longer binary searchable based on the score.
  *    </li>
  *  </ul>
@@ -72,7 +72,7 @@ public class SortedReplicas {
     _selectionFuncs = selectionFuncs;
     _scoreFunc = scoreFunc;
     _priorityFuncs = priorityFuncs;
-    _replicaComparator =  (Replica r1, Replica r2) -> {
+    _replicaComparator = (Replica r1, Replica r2) -> {
       // First apply priority functions.
       int result = comparePriority(r1, r2);
       if (result != 0) {
@@ -135,7 +135,7 @@ public class SortedReplicas {
   }
 
   /**
-   * Add a new replicas to the sorted replicas. The replica will be included if it satisfies the requirement of all
+   * Add a new replica to the sorted replicas. The replica will be included if it satisfies the requirement of all
    * selection functions. It has no impact if this {@link SortedReplicas} has not been initialized.
    *
    * @param replica the replica to add.
@@ -156,7 +156,7 @@ public class SortedReplicas {
    */
   void remove(Replica replica) {
     if (_initialized) {
-        _sortedReplicas.remove(replica);
+      _sortedReplicas.remove(replica);
     }
   }
 

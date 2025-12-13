@@ -4,19 +4,15 @@
 
 package com.linkedin.kafka.cruisecontrol.detector.notifier;
 
+import com.linkedin.cruisecontrol.detector.Anomaly;
 import com.linkedin.cruisecontrol.detector.AnomalyType;
-import org.apache.http.client.methods.HttpPost;
-import org.apache.http.entity.StringEntity;
-import org.apache.http.impl.client.CloseableHttpClient;
-import org.apache.http.impl.client.HttpClients;
 import org.apache.kafka.common.utils.Time;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-
 import java.io.IOException;
 import java.util.Map;
 
-import static com.linkedin.kafka.cruisecontrol.KafkaCruiseControlUtils.toDateString;
+import static com.linkedin.cruisecontrol.CruiseControlUtils.utcDateFor;
 
 public class SlackSelfHealingNotifier extends SelfHealingNotifier {
 
@@ -25,14 +21,17 @@ public class SlackSelfHealingNotifier extends SelfHealingNotifier {
     public static final String SLACK_SELF_HEALING_NOTIFIER_ICON = "slack.self.healing.notifier.icon";
     public static final String SLACK_SELF_HEALING_NOTIFIER_USER = "slack.self.healing.notifier.user";
     public static final String SLACK_SELF_HEALING_NOTIFIER_CHANNEL = "slack.self.healing.notifier.channel";
+    public static final String SLACK_SELF_HEALING_NOTIFIER_PREAMBLE = "slack.self.healing.notifier.preamble";
 
     public static final String DEFAULT_SLACK_SELF_HEALING_NOTIFIER_ICON = ":information_source:";
     public static final String DEFAULT_SLACK_SELF_HEALING_NOTIFIER_USER = "Cruise Control";
+    public static final String DEFAULT_SLACK_SELF_HEALING_NOTIFIER_PREAMBLE = "";
 
     protected String _slackWebhook;
     protected String _slackIcon;
     protected String _slackChannel;
     protected String _slackUser;
+    protected String _slackPreamble;
 
     public SlackSelfHealingNotifier() {
     }
@@ -48,12 +47,14 @@ public class SlackSelfHealingNotifier extends SelfHealingNotifier {
         _slackIcon = (String) config.get(SLACK_SELF_HEALING_NOTIFIER_ICON);
         _slackChannel = (String) config.get(SLACK_SELF_HEALING_NOTIFIER_CHANNEL);
         _slackUser = (String) config.get(SLACK_SELF_HEALING_NOTIFIER_USER);
+        _slackPreamble = (String) config.get(SLACK_SELF_HEALING_NOTIFIER_PREAMBLE);
         _slackIcon = _slackIcon == null ? DEFAULT_SLACK_SELF_HEALING_NOTIFIER_ICON : _slackIcon;
         _slackUser = _slackUser == null ? DEFAULT_SLACK_SELF_HEALING_NOTIFIER_USER : _slackUser;
+        _slackPreamble = _slackPreamble == null ? DEFAULT_SLACK_SELF_HEALING_NOTIFIER_PREAMBLE : _slackPreamble;
     }
 
     @Override
-    public void alert(Object anomaly, boolean autoFixTriggered, long selfHealingStartTime, AnomalyType anomalyType) {
+    public void alert(Anomaly anomaly, boolean autoFixTriggered, long selfHealingStartTime, AnomalyType anomalyType) {
         super.alert(anomaly, autoFixTriggered, selfHealingStartTime, anomalyType);
 
         if (_slackWebhook == null) {
@@ -66,13 +67,11 @@ public class SlackSelfHealingNotifier extends SelfHealingNotifier {
             return;
         }
 
-        String text;
-        if (autoFixTriggered) {
-            text = "Self-healing has been triggered.";
-        } else {
-            text = String.format("%s detected %s. Self healing %s.", anomalyType, anomaly,
-                    _selfHealingEnabled.get(anomalyType) ? String.format("start time %s", toDateString(selfHealingStartTime)) : "is disabled");
-        }
+        String text = String.format("%s%s detected %s. Self healing %s.%s", _slackPreamble, anomalyType, anomaly,
+                _selfHealingEnabled.get(anomalyType) ? String.format("start time %s", utcDateFor(selfHealingStartTime))
+                        : "is disabled",
+                autoFixTriggered ? "%nSelf-healing has been triggered." : "");
+
         try {
             sendSlackMessage(new SlackMessage(_slackUser, text, _slackIcon, _slackChannel), _slackWebhook);
         } catch (IOException e) {
@@ -81,16 +80,6 @@ public class SlackSelfHealingNotifier extends SelfHealingNotifier {
     }
 
     protected void sendSlackMessage(SlackMessage slackMessage, String slackWebhookUrl) throws IOException {
-        CloseableHttpClient client = HttpClients.createDefault();
-        HttpPost httpPost = new HttpPost(slackWebhookUrl);
-        StringEntity entity = new StringEntity(slackMessage.toString());
-        httpPost.setEntity(entity);
-        httpPost.setHeader("Accept", "application/json");
-        httpPost.setHeader("Content-type", "application/json");
-        try {
-            client.execute(httpPost);
-        } finally {
-            client.close();
-        }
+        NotifierUtils.sendMessage(slackMessage.toString(), slackWebhookUrl, null);
     }
 }

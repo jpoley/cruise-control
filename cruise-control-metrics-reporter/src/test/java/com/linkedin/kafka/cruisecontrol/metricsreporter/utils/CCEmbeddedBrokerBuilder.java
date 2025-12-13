@@ -9,10 +9,18 @@ import java.util.HashMap;
 import java.util.Map;
 import java.util.StringJoiner;
 import java.util.concurrent.atomic.AtomicInteger;
-import kafka.server.KafkaConfig;
-import org.apache.kafka.common.network.Mode;
+import org.apache.kafka.common.config.SslConfigs;
 import org.apache.kafka.common.security.auth.SecurityProtocol;
-import org.apache.kafka.test.TestSslUtils;
+import org.apache.kafka.coordinator.group.GroupCoordinatorConfig;
+import org.apache.kafka.network.SocketServerConfigs;
+import org.apache.kafka.raft.QuorumConfig;
+import org.apache.kafka.server.config.KRaftConfigs;
+import org.apache.kafka.server.config.ReplicationConfigs;
+import org.apache.kafka.server.config.ServerConfigs;
+import org.apache.kafka.server.config.ServerLogConfigs;
+import org.apache.kafka.storage.internals.log.CleanerConfig;
+
+import static com.linkedin.kafka.cruisecontrol.metricsreporter.utils.CCKafkaRaftServer.CLUSTER_ID_CONFIG;
 
 
 public class CCEmbeddedBrokerBuilder {
@@ -20,21 +28,23 @@ public class CCEmbeddedBrokerBuilder {
 
   //mandatory fields
   private int _nodeId = BROKER_ID_COUNTER.incrementAndGet();
-  private String _zkConnect;
+  private String _kraftConnect;
+  private String _clusterId;
   //storage config
   private File _logDirectory;
+  private File _metadataLogDirectory;
   //networking config
   private int _plaintextPort = -1;
   private int _sslPort = -1;
   private File _trustStore;
-  private long _socketTimeout = 1500;
+  private long _socketTimeoutMs = 1500;
   //feature control
   private boolean _enableControlledShutdown;
-  private long _controlledShutdownRetryBackoff = 100;
   private boolean _enableDeleteTopic;
   private boolean _enableLogCleaner;
   //resource management
-  private long _logCleanerDedupBufferSize = 2097152; //2MB
+  // 2MB
+  private long _logCleanerDedupBufferSize = 2097152;
   private String _rack;
 
   public CCEmbeddedBrokerBuilder() {
@@ -52,24 +62,41 @@ public class CCEmbeddedBrokerBuilder {
   }
 
   /**
-   * Set Zk connect.
-   *
-   * @param zkConnect Zk connect String.
+   * Set the KRaft quorum voters string
+   * @param kraftConnect quorum voters string
    * @return This.
    */
-  public CCEmbeddedBrokerBuilder zkConnect(String zkConnect) {
-    _zkConnect = zkConnect;
+  public CCEmbeddedBrokerBuilder kraftConnect(String kraftConnect) {
+    _kraftConnect = kraftConnect;
     return this;
   }
 
   /**
-   * Set Zk connect.
-   *
-   * @param zk Embedded Zookeeper.
+   * Set the KRaft quorum voters string
+   * @param kraft {@link CCEmbeddedBrokerBuilder} instance
    * @return This.
    */
-  public CCEmbeddedBrokerBuilder zkConnect(CCEmbeddedZookeeper zk) {
-    return zkConnect(zk.connectionString());
+  public CCEmbeddedBrokerBuilder kraftConnect(CCEmbeddedKRaftController kraft) {
+    return kraftConnect(kraft.quorumVoters());
+  }
+
+  /**
+   * Set the Kafka cluster ID
+   * @param clusterId the ID of the Kafka cluster
+   * @return This.
+   */
+  public CCEmbeddedBrokerBuilder clusterId(String clusterId) {
+    _clusterId = clusterId;
+    return this;
+  }
+
+  /**
+   * Set the Kafka cluster ID
+   * @param kraft {@link CCEmbeddedBrokerBuilder} instance
+   * @return This.
+   */
+  public CCEmbeddedBrokerBuilder clusterId(CCEmbeddedKRaftController kraft) {
+    return clusterId(kraft.clusterId());
   }
 
   /**
@@ -153,18 +180,18 @@ public class CCEmbeddedBrokerBuilder {
 
   /**
    * Set socket timeout
-   * @param socketTimeout Socket timeout.
+   * @param socketTimeoutMs Socket timeout.
    * @return This
    */
-  public CCEmbeddedBrokerBuilder socketTimeout(long socketTimeout) {
-    _socketTimeout = socketTimeout;
+  public CCEmbeddedBrokerBuilder socketTimeoutMs(long socketTimeoutMs) {
+    _socketTimeoutMs = socketTimeoutMs;
     return this;
   }
 
   /**
    * Set enableControlledShutdown.
    *
-   * @param enableControlledShutdown True to enable controlled shutdown, false otherwise.
+   * @param enableControlledShutdown {@code true} to enable controlled shutdown, {@code false} otherwise.
    * @return This
    */
   public CCEmbeddedBrokerBuilder enableControlledShutdown(boolean enableControlledShutdown) {
@@ -173,18 +200,9 @@ public class CCEmbeddedBrokerBuilder {
   }
 
   /**
-   * @param controlledShutdownRetryBackoff controlled shutdown retry backoff.
-   * @return This
-   */
-  public CCEmbeddedBrokerBuilder controlledShutdownRetryBackoff(long controlledShutdownRetryBackoff) {
-    _controlledShutdownRetryBackoff = controlledShutdownRetryBackoff;
-    return this;
-  }
-
-  /**
    * Enable delete topic.
    *
-   * @param enableDeleteTopic True to enable delete topic, false otherwise.
+   * @param enableDeleteTopic {@code true} to enable delete topic, {@code false} otherwise.
    * @return This
    */
   public CCEmbeddedBrokerBuilder enableDeleteTopic(boolean enableDeleteTopic) {
@@ -195,7 +213,7 @@ public class CCEmbeddedBrokerBuilder {
   /**
    * Enable log cleaner.
    *
-   * @param enableLogCleaner True to enable log cleaner, false otherwise.
+   * @param enableLogCleaner {@code true} to enable log cleaner, {@code false} otherwise.
    * @return This.
    */
   public CCEmbeddedBrokerBuilder enableLogCleaner(boolean enableLogCleaner) {
@@ -226,6 +244,9 @@ public class CCEmbeddedBrokerBuilder {
     if (_logDirectory == null) {
       _logDirectory = CCKafkaTestUtils.newTempDir();
     }
+    if (_metadataLogDirectory == null) {
+      _metadataLogDirectory = CCKafkaTestUtils.newTempDir();
+    }
   }
 
   private void validate() throws IllegalArgumentException {
@@ -235,8 +256,8 @@ public class CCEmbeddedBrokerBuilder {
     if (_logDirectory == null) {
       throw new IllegalArgumentException("log directory must be specified");
     }
-    if (_zkConnect == null) {
-      throw new IllegalArgumentException("zkConnect must be specified");
+    if (_metadataLogDirectory == null) {
+      throw new IllegalArgumentException("metadata log directory must be specified");
     }
   }
 
@@ -256,27 +277,32 @@ public class CCEmbeddedBrokerBuilder {
     if (_sslPort >= 0) {
       csvJoiner.add(SecurityProtocol.SSL.name + "://localhost:" + _sslPort);
     }
-    props.put(KafkaConfig.BrokerIdProp(), Integer.toString(_nodeId));
-    props.put(KafkaConfig.ListenersProp(), csvJoiner.toString());
-    props.put(KafkaConfig.LogDirProp(), _logDirectory.getAbsolutePath());
-    props.put(KafkaConfig.ZkConnectProp(), _zkConnect);
-    props.put(KafkaConfig.ReplicaSocketTimeoutMsProp(), Long.toString(_socketTimeout));
-    props.put(KafkaConfig.ControllerSocketTimeoutMsProp(), Long.toString(_socketTimeout));
-    props.put(KafkaConfig.ControlledShutdownEnableProp(), Boolean.toString(_enableControlledShutdown));
-    props.put(KafkaConfig.DeleteTopicEnableProp(), Boolean.toString(_enableDeleteTopic));
-    props.put(KafkaConfig.ControlledShutdownRetryBackoffMsProp(), Long.toString(_controlledShutdownRetryBackoff));
-    props.put(KafkaConfig.LogCleanerDedupeBufferSizeProp(), Long.toString(_logCleanerDedupBufferSize));
-    props.put(KafkaConfig.LogCleanerEnableProp(), Boolean.toString(_enableLogCleaner));
-    props.put(KafkaConfig.OffsetsTopicReplicationFactorProp(), "1");
-    props.put(KafkaConfig.SslEndpointIdentificationAlgorithmProp(), "");
+    props.put(KRaftConfigs.PROCESS_ROLES_CONFIG, "broker");
+    props.put(KRaftConfigs.NODE_ID_CONFIG, Integer.toString(_nodeId));
+    props.put(QuorumConfig.QUORUM_VOTERS_CONFIG, _kraftConnect);
+    props.put(CLUSTER_ID_CONFIG, _clusterId);
+    props.put(KRaftConfigs.CONTROLLER_LISTENER_NAMES_CONFIG, "CONTROLLER");
+    props.put(SocketServerConfigs.LISTENER_SECURITY_PROTOCOL_MAP_CONFIG, "CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT,SSL:SSL");
+    props.put(SocketServerConfigs.LISTENERS_CONFIG, csvJoiner.toString());
+    props.put(ServerLogConfigs.LOG_DIR_CONFIG, _logDirectory.getAbsolutePath());
+    props.put(KRaftConfigs.METADATA_LOG_DIR_CONFIG, _metadataLogDirectory.getAbsolutePath());
+    props.put(ReplicationConfigs.REPLICA_SOCKET_TIMEOUT_MS_CONFIG, Long.toString(_socketTimeoutMs));
+    props.put(ReplicationConfigs.CONTROLLER_SOCKET_TIMEOUT_MS_CONFIG, Long.toString(_socketTimeoutMs));
+    props.put(ServerConfigs.CONTROLLED_SHUTDOWN_ENABLE_CONFIG, Boolean.toString(_enableControlledShutdown));
+    props.put(ServerConfigs.DELETE_TOPIC_ENABLE_CONFIG, Boolean.toString(_enableDeleteTopic));
+    props.put(CleanerConfig.LOG_CLEANER_DEDUPE_BUFFER_SIZE_PROP, Long.toString(_logCleanerDedupBufferSize));
+    props.put(CleanerConfig.LOG_CLEANER_ENABLE_PROP, Boolean.toString(_enableLogCleaner));
+    props.put(GroupCoordinatorConfig.OFFSETS_TOPIC_REPLICATION_FACTOR_CONFIG, "1");
+    props.put(SslConfigs.SSL_ENDPOINT_IDENTIFICATION_ALGORITHM_CONFIG, "");
     if (_rack != null) {
-      props.put(KafkaConfig.RackProp(), _rack);
+      props.put(ServerConfigs.BROKER_RACK_CONFIG, _rack);
     }
     if (_trustStore != null || _sslPort > 0) {
       try {
-        props.putAll(TestSslUtils.createSslConfig(false, true, Mode.SERVER, _trustStore, "server" + _nodeId));
+        props.putAll(CCSslTestUtils.createSslConfig(false, true,
+            CCSslTestUtils.ConnectionMode.SERVER, _trustStore, "server" + _nodeId));
         // Switch interbroker to ssl
-        props.put(KafkaConfig.InterBrokerSecurityProtocolProp(), SecurityProtocol.SSL.name);
+        props.put(ReplicationConfigs.INTER_BROKER_SECURITY_PROTOCOL_CONFIG, SecurityProtocol.SSL.name);
       } catch (Exception e) {
         throw new IllegalStateException(e);
       }

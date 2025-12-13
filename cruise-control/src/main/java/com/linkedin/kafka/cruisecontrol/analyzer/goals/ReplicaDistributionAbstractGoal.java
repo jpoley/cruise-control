@@ -7,13 +7,14 @@ package com.linkedin.kafka.cruisecontrol.analyzer.goals;
 
 import com.linkedin.kafka.cruisecontrol.analyzer.BalancingAction;
 import com.linkedin.kafka.cruisecontrol.analyzer.OptimizationOptions;
+import com.linkedin.kafka.cruisecontrol.analyzer.ProvisionRecommendation;
+import com.linkedin.kafka.cruisecontrol.analyzer.ProvisionStatus;
 import com.linkedin.kafka.cruisecontrol.exception.OptimizationFailureException;
 import com.linkedin.kafka.cruisecontrol.model.Broker;
 import com.linkedin.kafka.cruisecontrol.model.ClusterModel;
 import com.linkedin.kafka.cruisecontrol.monitor.ModelCompletenessRequirements;
 import java.util.HashSet;
 import java.util.Set;
-import java.util.SortedSet;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -35,6 +36,8 @@ public abstract class ReplicaDistributionAbstractGoal extends AbstractGoal {
   protected double _avgReplicasOnAliveBroker;
   protected int _balanceUpperLimit;
   protected int _balanceLowerLimit;
+  // This is used to identify brokers not excluded for replica moves.
+  protected Set<Integer> _brokersAllowedReplicaMove;
 
   /**
    * Constructor for Replica Distribution Abstract Goal.
@@ -48,7 +51,7 @@ public abstract class ReplicaDistributionAbstractGoal extends AbstractGoal {
    * Apply several adjustments to the requested rebalance threshold to be used by goal optimization.
    * <ol>
    *   <li>If the goal optimization is triggered by goal violation detector, increase threshold by multiplying with
-   *       {@link com.linkedin.kafka.cruisecontrol.config.KafkaCruiseControlConfig#GOAL_VIOLATION_DISTRIBUTION_THRESHOLD_MULTIPLIER_CONFIG}</li>
+   *       {@link com.linkedin.kafka.cruisecontrol.config.constants.AnalyzerConfig#GOAL_VIOLATION_DISTRIBUTION_THRESHOLD_MULTIPLIER_CONFIG}</li>
    *   <li>Add a balance margin to avoid churn, e.g. if the threshold with prior adjustment applied is balancePercentage,
    *       we use (balancePercentage-1)*{@link #BALANCE_MARGIN} instead.</li>
    * </ol>
@@ -112,27 +115,23 @@ public abstract class ReplicaDistributionAbstractGoal extends AbstractGoal {
   }
 
   /**
-   * Get brokers that the rebalance process will go over to apply balancing actions to replicas they contain.
-   *
-   * @param clusterModel The state of the cluster.
-   * @return A collection of brokers that the rebalance process will go over to apply balancing actions to replicas
-   *         they contain.
-   */
-  @Override
-  protected SortedSet<Broker> brokersToBalance(ClusterModel clusterModel) {
-    return clusterModel.brokers();
-  }
-
-  /**
    * Initiates replica distribution abstract goal.
    *
    * @param clusterModel The state of the cluster.
    * @param optimizationOptions Options to take into account during optimization.
    */
   @Override
-  protected void initGoalState(ClusterModel clusterModel, OptimizationOptions optimizationOptions) {
+  protected void initGoalState(ClusterModel clusterModel, OptimizationOptions optimizationOptions)
+      throws OptimizationFailureException {
+    _brokersAllowedReplicaMove = GoalUtils.aliveBrokersNotExcludedForReplicaMove(clusterModel, optimizationOptions);
+    if (_brokersAllowedReplicaMove.isEmpty()) {
+      // Handle the case when all alive brokers are excluded from replica moves.
+      ProvisionRecommendation recommendation = new ProvisionRecommendation.Builder(ProvisionStatus.UNDER_PROVISIONED)
+          .numBrokers(clusterModel.maxReplicationFactor()).build();
+      throw new OptimizationFailureException(String.format("[%s] All alive brokers are excluded from replica moves.", name()), recommendation);
+    }
     // Initialize the average replicas on an alive broker.
-    _avgReplicasOnAliveBroker = numInterestedReplicas(clusterModel) / (double) clusterModel.aliveBrokers().size();
+    _avgReplicasOnAliveBroker = numInterestedReplicas(clusterModel) / (double) _brokersAllowedReplicaMove.size();
 
     // Log a warning if all replicas are excluded.
     if (clusterModel.topics().equals(optimizationOptions.excludedTopics())) {
@@ -145,24 +144,27 @@ public abstract class ReplicaDistributionAbstractGoal extends AbstractGoal {
   }
 
   /**
-   * Count of replicas of interest in the cluster, use to calculate balance upper/lower limit.
+   * Check whether the given broker is excluded for replica moves.
+   * Such a broker cannot receive replicas, but can give them away.
+   *
+   * @param broker Broker to check for exclusion from replica moves.
+   * @return {@code true} if the given broker is excluded for replica moves, {@code false} otherwise.
+   */
+  protected boolean isExcludedForReplicaMove(Broker broker) {
+    return !_brokersAllowedReplicaMove.contains(broker.id());
+  }
+
+  /**
+   * @param clusterModel The state of the cluster.
+   * @return The count of replicas of interest in the cluster, use to calculate balance upper/lower limit.
    */
   abstract int numInterestedReplicas(ClusterModel clusterModel);
 
   /**
-   * The requested balance threshold.
+   * @return The requested balance threshold.
    */
   abstract double balancePercentage();
 
-  /**
-   * Check if requirements of this goal are not violated if this proposal is applied to the given cluster state,
-   * false otherwise.
-   *
-   * @param clusterModel The state of the cluster.
-   * @param action Action containing information about potential modification to the given cluster model.
-   * @return True if requirements of this goal are not violated if this proposal is applied to the given cluster state,
-   *         false otherwise.
-   */
   @Override
   protected boolean selfSatisfied(ClusterModel clusterModel, BalancingAction action) {
     Broker sourceBroker = clusterModel.broker(action.sourceBrokerId());
@@ -216,11 +218,6 @@ public abstract class ReplicaDistributionAbstractGoal extends AbstractGoal {
     // Sanity check: No replica should be moved to a broker, which used to host any replica of the same partition on its broken disk.
     GoalUtils.ensureReplicasMoveOffBrokersWithBadDisks(clusterModel, name());
     finish();
-  }
-
-  @Override
-  public void finish() {
-    _finished = true;
   }
 
   /**
